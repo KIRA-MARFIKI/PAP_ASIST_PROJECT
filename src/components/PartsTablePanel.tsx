@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import gsap from 'gsap';
 import { X } from 'lucide-react';
 import { PartCategory, PartItem } from '../types/part';
-import { formatRupiah } from '../services/partsRepository';
+import { formatRupiah, normalizePartCodeKey } from '../services/partsRepository';
 import { SurfaceWatermark } from './WatermarkOverlay';
 
 interface PartsTablePanelProps {
@@ -55,37 +55,50 @@ export function PartsTablePanel({ isOpen, parts, onClose }: PartsTablePanelProps
 
   useEffect(() => {
     if (!isOpen) return;
-    const indicator = tabIndicatorRef.current;
-    const targetBtn = activeTab === 'fast' ? fastTabRef.current : slowTabRef.current;
-    if (!indicator || !targetBtn) return;
 
-    const mm = gsap.matchMedia();
-    mm.add('(prefers-reduced-motion: no-preference)', () => {
-      gsap.to(indicator, {
-        x: targetBtn.offsetLeft - 4,
-        width: targetBtn.offsetWidth,
-        duration: 0.24,
-        ease: 'power2.out',
-      });
-    });
-    mm.add('(prefers-reduced-motion: reduce)', () => {
-      gsap.set(indicator, {
-        x: targetBtn.offsetLeft - 4,
-        width: targetBtn.offsetWidth,
-      });
-    });
+    const updateIndicator = (animate: boolean) => {
+      const indicator = tabIndicatorRef.current;
+      const targetBtn = activeTab === 'fast' ? fastTabRef.current : slowTabRef.current;
+      if (!indicator || !targetBtn) return;
 
-    return () => mm.revert();
+      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      gsap.killTweensOf(indicator);
+      if (!animate || reduceMotion) {
+        gsap.set(indicator, {
+          x: targetBtn.offsetLeft - 4,
+          width: targetBtn.offsetWidth,
+        });
+      } else {
+        gsap.to(indicator, {
+          x: targetBtn.offsetLeft - 4,
+          width: targetBtn.offsetWidth,
+          duration: 0.24,
+          ease: 'power2.out',
+        });
+      }
+    };
+
+    updateIndicator(true);
+    const handleResize = () => updateIndicator(false);
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      if (tabIndicatorRef.current) {
+        gsap.killTweensOf(tabIndicatorRef.current);
+      }
+    };
   }, [activeTab, isOpen]);
 
   const filteredParts = useMemo(() => {
     const keyword = filterText.trim().toLowerCase();
+    const normalizedKey = normalizePartCodeKey(filterText);
     return parts.filter((part) => {
       if (part.kategori !== activeTab) return false;
       if (!keyword) return true;
       return (
         part.namaResmi.toLowerCase().includes(keyword) ||
         part.kodePart.toLowerCase().includes(keyword) ||
+        (normalizedKey.length >= 3 && normalizePartCodeKey(part.kodePart).includes(normalizedKey)) ||
         part.kodeRak.toLowerCase().includes(keyword) ||
         part.aliases.some((alias) => alias.toLowerCase().includes(keyword))
       );

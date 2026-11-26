@@ -46,8 +46,15 @@ function getWarehouseStatusBadge(
   };
 }
 
+function getSafeExternalUrl(raw?: string | null): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  return /^https?:\/\//i.test(trimmed) ? trimmed : null;
+}
+
 export function ResultCard({ part }: ResultCardProps) {
   const [imgSrc, setImgSrc] = useState(part.foto);
+  const safeSourceUrl = getSafeExternalUrl(part.sourceUrl);
 
   useEffect(() => {
     setImgSrc(part.foto);
@@ -126,9 +133,9 @@ export function ResultCard({ part }: ResultCardProps) {
               <span className="text-xs font-medium text-[#52525B]">
                 Harga belum tersedia
               </span>
-              {part.sourceUrl && (
+              {safeSourceUrl && (
                 <a
-                  href={part.sourceUrl}
+                  href={safeSourceUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex min-h-[32px] cursor-pointer items-center rounded-[6px] border border-[#E4E4E7] bg-[#F7F7F8] px-2.5 py-1 text-xs font-semibold text-[#18181B] underline decoration-[#CC0000]/60 underline-offset-2 transition-colors hover:border-[#CC0000]/50 hover:text-[#CC0000] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#CC0000]"

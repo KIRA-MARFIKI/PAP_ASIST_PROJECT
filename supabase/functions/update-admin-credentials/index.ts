@@ -139,6 +139,23 @@ Deno.serve(async (req: Request) => {
     );
   }
 
+  if (newEmail && newEmail !== adminProfile.email.toLowerCase()) {
+    const { data: emailConflict } = await serviceClient
+      .from('admin_profiles')
+      .select('user_id')
+      .eq('email', newEmail)
+      .neq('user_id', user.id)
+      .maybeSingle();
+
+    if (emailConflict) {
+      return jsonResponse(
+        req,
+        { error: 'Email baru sudah digunakan oleh akun admin lain.' },
+        409
+      );
+    }
+  }
+
   if (newEmail || newPassword) {
     const authUpdates: {
       email?: string;
@@ -154,7 +171,10 @@ Deno.serve(async (req: Request) => {
     if (newPassword) {
       authUpdates.password = newPassword;
     }
-    authUpdates.user_metadata = { full_name: 'Pap Asist Admin' };
+    authUpdates.user_metadata = {
+      ...(user.user_metadata ?? {}),
+      full_name: 'Pap Asist Admin',
+    };
 
     const { error: updateAuthError } = await serviceClient.auth.admin.updateUserById(
       user.id,

@@ -78,7 +78,7 @@ function searchLocally(query: string, catalog: PartItem[]): SearchPartResponse {
 
   const exactPart = catalog.find(
     (part) =>
-      normalizePartCodeKey(part.kodePart) === normalizedKey ||
+      (normalizedKey.length > 0 && normalizePartCodeKey(part.kodePart) === normalizedKey) ||
       normalizeText(part.namaResmi) === normalizedQuery
   );
 
@@ -96,7 +96,7 @@ function searchLocally(query: string, catalog: PartItem[]): SearchPartResponse {
       let bestScore = 0;
       const normName = normalizeText(part.namaResmi);
 
-      if (normName.includes(normalizedQuery)) {
+      if (normalizedQuery.length >= 3 && normName.includes(normalizedQuery)) {
         bestScore = Math.max(bestScore, 80);
       }
 
@@ -104,7 +104,10 @@ function searchLocally(query: string, catalog: PartItem[]): SearchPartResponse {
         const normAlias = normalizeText(alias);
         if (normAlias === normalizedQuery) {
           bestScore = Math.max(bestScore, 100);
-        } else if (normAlias.includes(normalizedQuery) || normalizedQuery.includes(normAlias)) {
+        } else if (
+          normalizedQuery.length >= 3 &&
+          (normAlias.includes(normalizedQuery) || normalizedQuery.includes(normAlias))
+        ) {
           bestScore = Math.max(bestScore, 70);
         } else {
           const queryTokens = normalizedQuery.split(' ').filter((t) => t.length >= 3);
@@ -298,11 +301,15 @@ export async function searchPartWithText(
   const trimmed = query.trim();
 
   // Hemat kuota Edge Function bila user memasukkan kode part persis yang ada di gudang & sudah punya harga
-  const exactCodeMatch = catalog.find(
-    (part) =>
-      normalizePartCodeKey(part.kodePart) === normalizePartCodeKey(trimmed) &&
-      part.harga !== null
-  );
+  const normalizedTrimmedKey = normalizePartCodeKey(trimmed);
+  const exactCodeMatch =
+    normalizedTrimmedKey.length >= 5
+      ? catalog.find(
+          (part) =>
+            normalizePartCodeKey(part.kodePart) === normalizedTrimmedKey &&
+            part.harga !== null
+        )
+      : undefined;
   if (exactCodeMatch) {
     return {
       isHondaPart: true,

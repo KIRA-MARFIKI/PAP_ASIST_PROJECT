@@ -74,6 +74,15 @@ export function LoginModal({
   const dialogRef = useRef<HTMLDivElement>(null);
   const captchaCanvasRef = useRef<HTMLCanvasElement>(null);
   const isClosingRef = useRef(false);
+  const fallbackTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (fallbackTimerRef.current !== null) {
+        window.clearTimeout(fallbackTimerRef.current);
+      }
+    };
+  }, []);
 
   const drawCaptcha = useCallback((code: string) => {
     const canvas = captchaCanvasRef.current;
@@ -248,7 +257,7 @@ export function LoginModal({
 
     if (!trimmedCaptcha) {
       nextErrors.captcha = 'Kode captcha wajib diisi.';
-    } else if (trimmedCaptcha !== captchaCode) {
+    } else if (trimmedCaptcha.toUpperCase() !== captchaCode) {
       nextErrors.captcha = 'Kode captcha tidak sesuai. Kode baru telah dibuat, silakan coba lagi.';
       refreshCaptcha();
     }
@@ -263,6 +272,8 @@ export function LoginModal({
 
     if (isSupabaseConfigured && supabase) {
       onAuthFlowBusyChange?.(true);
+      let passwordSignedIn = false;
+      let pinFullyVerified = false;
       try {
         const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
           email: trimmedEmail,
@@ -277,6 +288,8 @@ export function LoginModal({
           return;
         }
 
+        passwordSignedIn = true;
+
         const { data: pinData, error: pinError } = await supabase.rpc('verify_admin_pin', {
           p_pin: pin,
           p_full_name: trimmedNama,
@@ -287,6 +300,7 @@ export function LoginModal({
         if (pinError || !parsedPin?.verified) {
           // Segera akhiri sesi Auth bila PIN 12 digit gagal agar tidak ada sesi setengah terverifikasi.
           await supabase.auth.signOut();
+          passwordSignedIn = false;
           refreshCaptcha();
           const reason = parsedPin?.reason || 'PIN 12 digit tidak valid atau akun belum terdaftar sebagai admin gudang.';
           if (reason.toLowerCase().includes('nama')) {
@@ -297,6 +311,7 @@ export function LoginModal({
           return;
         }
 
+        pinFullyVerified = true;
         onLoginSuccess({
           userId: authData.user.id,
           nama: parsedPin.full_name || REQUIRED_ADMIN_NAME,
@@ -308,6 +323,9 @@ export function LoginModal({
         setCaptchaInput('');
         onClose();
       } catch {
+        if (passwordSignedIn && !pinFullyVerified) {
+          await supabase.auth.signOut().catch(() => {});
+        }
         refreshCaptcha();
         setErrors({
           form: 'Gagal terhubung ke layanan autentikasi Supabase. Periksa koneksi internet lalu coba lagi.',
@@ -320,7 +338,8 @@ export function LoginModal({
     }
 
     // Mode fallback lokal saat variabel environment Supabase belum diatur.
-    window.setTimeout(() => {
+    fallbackTimerRef.current = window.setTimeout(() => {
+      fallbackTimerRef.current = null;
       setIsSubmitting(false);
       onLoginSuccess({ nama: trimmedNama, email: trimmedEmail, role: 'warehouse_admin' });
       setPassword('');
@@ -571,7 +590,7 @@ export function LoginModal({
                   maxLength={6}
                   value={captchaInput}
                   onChange={(e) => {
-                    setCaptchaInput(e.target.value);
+                    setCaptchaInput(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6));
                     if (errors.captcha) setErrors((prev) => ({ ...prev, captcha: undefined }));
                   }}
                   placeholder="Ketik 6 karakter sesuai gambar (huruf kapital)"

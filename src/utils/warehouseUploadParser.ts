@@ -177,9 +177,17 @@ function parseOptionalNonNegativeNumber(raw: unknown): {
   const text = String(raw).trim();
   if (!text || text === '-') return { empty: true, value: null };
 
-  const cleaned = text.replace(/^rp\s*/i, '').replace(/\s+/g, '');
-  if (/^\d{1,3}(\.\d{3})+$/.test(cleaned)) {
-    const value = Number(cleaned.replace(/\./g, ''));
+  const cleaned = text.replace(/^rp\.?\s*/i, '').replace(/\s+/g, '');
+
+  // Format ribuan Indonesia: 125.000 atau 1.250.000,00
+  if (/^\d{1,3}(\.\d{3})+(,\d{1,2})?$/.test(cleaned)) {
+    const value = Number(cleaned.replace(/\./g, '').replace(',', '.'));
+    return { empty: false, value: Number.isFinite(value) && value >= 0 ? value : null };
+  }
+
+  // Format ribuan internasional: 125,000 atau 1,250,000.00
+  if (/^\d{1,3}(,\d{3})+(\.\d{1,2})?$/.test(cleaned)) {
+    const value = Number(cleaned.replace(/,/g, ''));
     return { empty: false, value: Number.isFinite(value) && value >= 0 ? value : null };
   }
 
@@ -366,25 +374,23 @@ export async function parseWarehouseFile(file: File): Promise<WarehouseParseResu
       }
 
       if (reasons.length > 0) {
-        const prefix = workbook.SheetNames.length > 1 ? `${sheetName} Baris ${rowNumber}` : `Baris ${rowNumber}`;
         failedRows.push({
           rowNumber,
-          sheetName,
+          sheetName: workbook.SheetNames.length > 1 ? sheetName : undefined,
           rawPartCode: rawKodePart || '-',
-          reason: `${prefix}: ${reasons.join('; ')}`,
+          reason: reasons.join('; '),
         });
         continue;
       }
 
       const stockKnown = !parsedStock.empty && parsedStock.value !== null;
       const finalStock = stockKnown ? parsedStock.value! : null;
-      const finalMinStock = stockKnown
-        ? !parsedMinStock.empty && parsedMinStock.value !== null
-          ? parsedMinStock.value
-          : 0
-        : null;
+      const finalMinStock =
+        !parsedMinStock.empty && parsedMinStock.value !== null ? parsedMinStock.value : null;
 
-      const hasPrice = !parsedPrice.empty && parsedPrice.value !== null;
+      const roundedPrice =
+        !parsedPrice.empty && parsedPrice.value !== null ? Math.round(parsedPrice.value) : null;
+      const hasValidPrice = roundedPrice !== null && roundedPrice > 0;
       const isSub = isHondaSubstitutionCode(rawNamaPart);
 
       extractedRows.push({
@@ -394,8 +400,8 @@ export async function parseWarehouseFile(file: File): Promise<WarehouseParseResu
         kodePart: rawKodePart.toUpperCase(),
         rawName: rawNamaPart,
         kodeRak: rawRack ? rawRack.toUpperCase() : '-',
-        harga: hasPrice ? Math.round(parsedPrice.value!) : null,
-        priceSource: hasPrice ? 'warehouse' : 'none',
+        harga: hasValidPrice ? roundedPrice : null,
+        priceSource: hasValidPrice ? 'warehouse' : 'none',
         explicitCategory: parsedCategory.value,
         stok: finalStock,
         stokMinimum: finalMinStock,
@@ -514,7 +520,7 @@ export async function parseWarehouseFile(file: File): Promise<WarehouseParseResu
         priceSource: existing.harga !== null ? existing.priceSource : row.priceSource,
         kategori: chosenCategory,
         stok: existing.stockKnown ? existing.stok : row.stok,
-        stokMinimum: existing.stockKnown ? existing.stokMinimum : row.stokMinimum,
+        stokMinimum: existing.stokMinimum !== null ? existing.stokMinimum : row.stokMinimum,
         stockKnown: existing.stockKnown || row.stockKnown,
         substitutedBy: existing.substitutedBy || substitutedBy,
         aliases: mergedAliases,
@@ -537,6 +543,15 @@ export async function parseWarehouseFile(file: File): Promise<WarehouseParseResu
         aiEnriched,
       });
     }
+  }
+
+  if (totalDataRowsSeen === 0 && failedRows.length === 0) {
+    failedRows.push({
+      rowNumber: 1,
+      rawPartCode: '-',
+      reason:
+        'Header kolom No Part / Kode Part dan Nama Part tidak ditemukan pada lembar kerja.',
+    });
   }
 
   return {

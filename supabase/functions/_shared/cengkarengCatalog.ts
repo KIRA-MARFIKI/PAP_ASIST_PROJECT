@@ -70,9 +70,41 @@ export function decodeHtmlEntities(text: string): string {
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
     .replace(/&#8211;|&#8212;|&ndash;|&mdash;/gi, '-')
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => {
+      const cp = Number.parseInt(hex, 16);
+      return Number.isFinite(cp) && cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : '';
+    })
+    .replace(/&#(\d+);/g, (_, dec: string) => {
+      const cp = Number.parseInt(dec, 10);
+      return Number.isFinite(cp) && cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : '';
+    })
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+export function isHttpUrl(url: unknown): url is string {
+  if (typeof url !== 'string') return false;
+  const trimmed = url.trim();
+  return /^https?:\/\//i.test(trimmed);
+}
+
+export function isStrongPartCodeMatch(
+  candidate: CengkarengCandidate,
+  targetCodes: string[]
+): boolean {
+  const normalizedTargets = targetCodes.map(normalizePartCode).filter((c) => c.length >= 8);
+  if (normalizedTargets.length === 0) return false;
+
+  const candidateCodes = candidate.partCodes.map(normalizePartCode).filter(Boolean);
+  for (const target of normalizedTargets) {
+    if (candidateCodes.includes(target)) return true;
+    const modelPrefix = target.slice(0, 8);
+    if (candidateCodes.some((code) => code.length >= 8 && code.startsWith(modelPrefix))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function extractHondaPartCodes(text: string): string[] {
@@ -104,7 +136,23 @@ export function extractHondaPartCodes(text: string): string[] {
 
 function parsePriceAmount(raw: unknown, minorUnit = 0): number | null {
   if (raw === null || raw === undefined) return null;
-  const digits = String(raw).replace(/[^0-9]/g, '');
+
+  if (typeof raw === 'number') {
+    if (!Number.isFinite(raw) || raw <= 0) return null;
+    const divisor = minorUnit > 0 ? Math.pow(10, minorUnit) : 1;
+    const adjusted = Math.round(raw / divisor);
+    return adjusted >= 500 && adjusted <= 50_000_000 ? adjusted : null;
+  }
+
+  let text = String(raw).trim();
+  if (!text) return null;
+
+  // Saat minorUnit = 0 (mis. JSON-LD "125000.00" atau HTML "125.000,00"), buang 1-2 digit desimal di akhir agar tidak dikali 100.
+  if (minorUnit === 0) {
+    text = text.replace(/[.,]\d{1,2}$/, '');
+  }
+
+  const digits = text.replace(/[^0-9]/g, '');
   if (!digits) return null;
   const rawNum = Number(digits);
   if (!Number.isFinite(rawNum) || rawNum <= 0) return null;
@@ -129,7 +177,23 @@ function extractIdrPriceFromHtml(html: string): number | null {
     }
   }
 
-  const wooMatch = html.match(/woocommerce-Price-amount[^>]*>([\s\S]{0,180}?)<\/span>/i);
+  // Buang harga coret (<del>) agar tidak terbaca sebagai harga aktif
+  const htmlWithoutDel = html.replace(/<del[^>]*>[\s\S]*?<\/del>/gi, ' ');
+
+  // WooCommerce modern membungkus angka harga di dalam <bdi><span class="woocommerce-Price-currencySymbol">Rp</span>&nbsp;125.000</bdi>
+  const wooBdiMatch = htmlWithoutDel.match(
+    /woocommerce-Price-amount[^>]*>\s*<bdi[^>]*>([\s\S]{0,220}?)<\/bdi>/i
+  );
+  if (wooBdiMatch?.[1]) {
+    const wooText = decodeHtmlEntities(wooBdiMatch[1]);
+    const wooPrice = wooText.match(/Rp\.?\s*([0-9]{1,3}(?:[.,][0-9]{3})+|[0-9]{4,8})/i);
+    if (wooPrice?.[1]) {
+      const parsed = parsePriceAmount(wooPrice[1], 0);
+      if (parsed !== null) return parsed;
+    }
+  }
+
+  const wooMatch = htmlWithoutDel.match(/woocommerce-Price-amount[^>]*>([\s\S]{0,180}?)<\/span>/i);
   if (wooMatch?.[1]) {
     const wooText = decodeHtmlEntities(wooMatch[1]);
     const wooPrice = wooText.match(/Rp\.?\s*([0-9]{1,3}(?:[.,][0-9]{3})+|[0-9]{4,8})/i);
@@ -139,7 +203,7 @@ function extractIdrPriceFromHtml(html: string): number | null {
     }
   }
 
-  const plain = decodeHtmlEntities(html);
+  const plain = decodeHtmlEntities(htmlWithoutDel);
   const genericMatches = plain.match(/Rp\.?\s*([0-9]{1,3}(?:[.,][0-9]{3})+|[0-9]{4,8})/gi);
   if (genericMatches) {
     for (const raw of genericMatches) {
@@ -399,15 +463,20 @@ function extractCandidatesFromJsonLd(html: string): CengkarengCandidate[] {
 
     if (types.includes('Product')) {
       const title = decodeHtmlEntities(String(node.name || ''));
-      const url = typeof node.url === 'string' ? node.url.trim() : '';
+      const url = isHttpUrl(node.url) ? node.url.trim() : '';
       const sku = typeof node.sku === 'string' ? node.sku.trim() : '';
       const imageVal = node.image;
-      const photoUrl =
-        typeof imageVal === 'string' && imageVal.startsWith('http')
-          ? imageVal.trim()
-          : Array.isArray(imageVal) && typeof imageVal[0] === 'string'
-            ? imageVal[0].trim()
-            : null;
+      const extractImageUrl = (val: unknown): string | null => {
+        if (isHttpUrl(val)) return val.trim();
+        if (val && typeof val === 'object' && 'url' in val) {
+          const objUrl = (val as { url?: unknown }).url;
+          if (isHttpUrl(objUrl)) return objUrl.trim();
+        }
+        return null;
+      };
+      const photoUrl = Array.isArray(imageVal)
+        ? extractImageUrl(imageVal[0])
+        : extractImageUrl(imageVal);
       const offers = node.offers as Record<string, unknown> | Array<Record<string, unknown>> | undefined;
       const firstOffer = Array.isArray(offers) ? offers[0] : offers;
       const priceIdr =
@@ -525,7 +594,7 @@ async function queryHtmlSearchFallback(term: string): Promise<{
       while ((blockMatch = productBlockRegex.exec(html)) !== null && candidates.length < 5) {
         const block = blockMatch[1];
         const linkMatch = block.match(
-          /href=["'](https:\/\/www\.hondacengkareng\.com\/produk\/[^"'#?]+)["']/i
+          /href=["'](https?:\/\/(?:www\.)?hondacengkareng\.com\/(?:produk|product)\/[^"'#?]+)["']/i
         );
         const prodUrl = linkMatch?.[1]?.trim() || '';
         if (!prodUrl || seenUrls.has(prodUrl)) continue;

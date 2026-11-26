@@ -129,6 +129,8 @@ export function App() {
   const cameraFallbackInputRef = useRef<HTMLInputElement>(null);
   const flipStateRef = useRef<Flip.FlipState | null>(null);
   const isPinFlowBusyRef = useRef(false);
+  const searchRequestIdRef = useRef(0);
+  const imageSelectIdRef = useRef(0);
   const lastSearchPayloadRef = useRef<{ query: string; image: File | null }>({
     query: '',
     image: null,
@@ -364,6 +366,9 @@ export function App() {
         return;
       }
 
+      const requestId = searchRequestIdRef.current + 1;
+      searchRequestIdRef.current = requestId;
+
       lastSearchPayloadRef.current = { query: activeQuery, image: activeImage };
       setIsHistoryOpen(false);
       setIsNotifOpen(false);
@@ -379,6 +384,10 @@ export function App() {
         const searchResponse = activeImage
           ? await searchPartWithImage(activeImage, activeQuery, parts)
           : await searchPartWithText(activeQuery, parts);
+
+        if (requestId !== searchRequestIdRef.current) {
+          return;
+        }
 
         if (searchResponse.isHondaPart === false) {
           setStatus('idle');
@@ -407,6 +416,9 @@ export function App() {
           setStatus('success');
         }
       } catch (err) {
+        if (requestId !== searchRequestIdRef.current) {
+          return;
+        }
         setStatus('error');
         if (err instanceof AiSearchError) {
           setAiNotice({
@@ -430,40 +442,59 @@ export function App() {
     [query, selectedImageFile, saveToHistory, triggerDockTransition, parts]
   );
 
-  const handleSelectImage = useCallback(
-    async (file: File, alreadyWatermarked = false) => {
-      const processedFile = alreadyWatermarked
-        ? file
-        : await applyWatermarkToImageFile(file);
-
-      if (selectedImagePreview) {
-        URL.revokeObjectURL(selectedImagePreview);
-      }
-      const previewUrl = URL.createObjectURL(processedFile);
-      setSelectedImageFile(processedFile);
-      setSelectedImagePreview(previewUrl);
-      void executeSearch(query, processedFile);
-    },
-    [executeSearch, query, selectedImagePreview]
-  );
-
   const handleClearImage = useCallback(() => {
-    if (selectedImagePreview) {
-      URL.revokeObjectURL(selectedImagePreview);
-    }
+    imageSelectIdRef.current += 1;
     setSelectedImageFile(null);
     setSelectedImagePreview(null);
-  }, [selectedImagePreview]);
+  }, []);
+
+  const handleSelectImage = useCallback(
+    async (file: File, alreadyWatermarked = false) => {
+      const selectId = imageSelectIdRef.current + 1;
+      imageSelectIdRef.current = selectId;
+
+      try {
+        const processedFile = alreadyWatermarked
+          ? file
+          : await applyWatermarkToImageFile(file);
+
+        if (selectId !== imageSelectIdRef.current) {
+          return;
+        }
+
+        const previewUrl = URL.createObjectURL(processedFile);
+        setSelectedImageFile(processedFile);
+        setSelectedImagePreview(previewUrl);
+        void executeSearch(query, processedFile);
+      } catch (err) {
+        if (selectId !== imageSelectIdRef.current) {
+          return;
+        }
+        setAiNotice({
+          type: 'ai_error',
+          message:
+            err instanceof Error
+              ? err.message
+              : 'Gagal memproses file gambar. Pastikan file berupa foto JPG, PNG, atau WebP yang valid.',
+          retryAfterSeconds: 0,
+        });
+      }
+    },
+    [executeSearch, query]
+  );
 
   const handleSelectHistory = (item: string) => {
+    handleClearImage();
     setQuery(item);
     setIsHistoryOpen(false);
     void executeSearch(item, null);
   };
 
   const handleSelectNotifPart = (part: PartItem) => {
+    searchRequestIdRef.current += 1;
     setIsNotifOpen(false);
     setIsHistoryOpen(false);
+    setAiNotice(null);
     handleClearImage();
     setQuery(part.namaResmi);
     triggerDockTransition();
@@ -475,11 +506,13 @@ export function App() {
 
   const handleResetHome = () => {
     if (!hasSearched) return;
+    searchRequestIdRef.current += 1;
     setHasSearched(false);
     setStatus('idle');
     setResults([]);
     setOfficialQueryName('');
     setSearchNote('');
+    setAiNotice(null);
     setQuery('');
     handleClearImage();
   };
@@ -516,15 +549,26 @@ export function App() {
   };
 
   const handleProcessUpload = useCallback(
-    async (fileName: string, parsed: WarehouseParseResult): Promise<{ storageError?: string }> => {
+    async (
+      fileName: string,
+      parsed: WarehouseParseResult
+    ): Promise<{ saved: boolean; storageError?: string }> => {
       let storageError: string | undefined;
+      let upsertFailed = false;
 
       if (parsed.validRows.length > 0) {
         const upsertResult = await upsertWarehouseParts(parsed.validRows, parts);
         setParts(upsertResult.parts);
+        if (upsertResult.upsertFailed) {
+          upsertFailed = true;
+        }
         if (upsertResult.storageError) {
           storageError = upsertResult.storageError;
         }
+      }
+
+      if (upsertFailed) {
+        return { saved: false, storageError };
       }
 
       const successCount = parsed.validRows.length;
@@ -550,7 +594,7 @@ export function App() {
         errors: parsed.failedRows.map((row) => ({
           rowNumber: row.rowNumber,
           partCode: row.rawPartCode,
-          reason: row.reason,
+          reason: row.sheetName ? `${row.sheetName}: ${row.reason}` : row.reason,
         })),
       };
 
@@ -562,10 +606,15 @@ export function App() {
         storageError = logSave.error;
       }
 
-      return { storageError };
+      return { saved: true, storageError };
     },
     [adminSession, parts]
   );
+
+  const handleCloseCamera = useCallback(() => setIsCameraOpen(false), []);
+  const handleCameraFallbackInput = useCallback(() => {
+    cameraFallbackInputRef.current?.click();
+  }, []);
 
   const handleSaveSinglePart = useCallback(
     async (payload: SinglePartUpdatePayload) => {
@@ -812,11 +861,11 @@ export function App() {
 
       <CameraModal
         isOpen={isCameraOpen}
-        onClose={() => setIsCameraOpen(false)}
+        onClose={handleCloseCamera}
         onCapture={(file) => {
           void handleSelectImage(file, true);
         }}
-        onFallbackInput={() => cameraFallbackInputRef.current?.click()}
+        onFallbackInput={handleCameraFallbackInput}
       />
 
       <LoginModal
@@ -862,7 +911,9 @@ export function App() {
             onRunEnrichBatch={async () => {
               const batchRes = await triggerEnrichPartsBatch(10);
               const refreshed = await fetchAllParts();
-              setParts(refreshed.parts);
+              if (refreshed.dataSource === 'supabase') {
+                setParts(refreshed.parts);
+              }
               return batchRes;
             }}
             onSaveSinglePart={handleSaveSinglePart}

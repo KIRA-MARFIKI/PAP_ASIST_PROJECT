@@ -1,8 +1,12 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.4';
 import { getCorsHeaders } from '../_shared/cors.ts';
-import { lookupHondaCengkarengCatalog } from '../_shared/cengkarengCatalog.ts';
+import {
+  isStrongPartCodeMatch,
+  lookupHondaCengkarengCatalog,
+} from '../_shared/cengkarengCatalog.ts';
 
 const MAX_BATCH_SIZE = 10;
+const GEMINI_TIMEOUT_MS = 20_000;
 const FALLBACK_FREE_MODELS = [
   'gemini-3.5-flash-lite',
   'gemini-3.1-flash-lite',
@@ -44,11 +48,14 @@ async function enrichBatchWithGemini(
   apiKey: string,
   preferredModel: string,
   rows: PendingPartRow[]
-): Promise<Map<string, GeminiBatchItem>> {
+): Promise<{ items: Map<string, GeminiBatchItem>; failed: boolean; rateLimited: boolean }> {
   const resultMap = new Map<string, GeminiBatchItem>();
-  if (!apiKey || rows.length === 0) return resultMap;
+  if (!apiKey || rows.length === 0) {
+    return { items: resultMap, failed: false, rateLimited: false };
+  }
 
   const modelChain = Array.from(new Set([preferredModel, ...FALLBACK_FREE_MODELS]));
+  let sawRateLimit = false;
 
   const inputItems = rows.map((r) => ({
     part_code: r.part_code,
@@ -100,9 +107,14 @@ Balas HANYA JSON valid:
             temperature: 0.1,
           },
         }),
+        signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
       });
 
-      if (res.status === 429 || res.status === 503 || res.status === 404) {
+      if (res.status === 429) {
+        sawRateLimit = true;
+        continue;
+      }
+      if (res.status === 503 || res.status === 404) {
         continue;
       }
       if (!res.ok) continue;
@@ -137,13 +149,13 @@ Balas HANYA JSON valid:
           });
         }
       }
-      return resultMap;
+      return { items: resultMap, failed: false, rateLimited: false };
     } catch {
       // Coba model fallback berikutnya
     }
   }
 
-  return resultMap;
+  return { items: resultMap, failed: true, rateLimited: sawRateLimit };
 }
 
 Deno.serve(async (req: Request) => {
@@ -205,8 +217,7 @@ Deno.serve(async (req: Request) => {
     .select(
       'part_code, part_code_display, official_name, price, price_source, category, substituted_by, photo_url, catalog_url, aliases, ai_enriched'
     )
-    .or('ai_enriched.eq.false,price.is.null,official_name.like.Kode Pengganti:%')
-    .order('ai_enriched', { ascending: true })
+    .eq('ai_enriched', false)
     .order('updated_at', { ascending: true })
     .limit(requestedBatch);
 
@@ -229,8 +240,21 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  // a. 1 panggilan batch Gemini Free Tier untuk seluruh 10 item sekaligus
-  const aiMap = await enrichBatchWithGemini(geminiApiKey, preferredModel, batch);
+  // a. 1 panggilan batch Gemini Free Tier untuk seluruh batch sekaligus
+  const aiResult = await enrichBatchWithGemini(geminiApiKey, preferredModel, batch);
+  if (geminiApiKey && aiResult.failed) {
+    return jsonResponse(
+      req,
+      {
+        error: aiResult.rateLimited
+          ? 'Layanan AI sedang mencapai batas kuota sementara. Coba lagi beberapa saat tanpa kehilangan antrean pengayaan.'
+          : 'Layanan AI sedang mengalami gangguan sementara. Antrean pengayaan dipertahankan agar dapat dicoba ulang.',
+      },
+      aiResult.rateLimited ? 429 : 502
+    );
+  }
+
+  const aiMap = aiResult.items;
 
   let priceUpdated = 0;
   let aliasesUpdated = 0;
@@ -245,13 +269,15 @@ Deno.serve(async (req: Request) => {
   for (const row of batch) {
     const aiInfo = aiMap.get(row.part_code);
     const needsName = row.official_name.startsWith('Kode Pengganti:');
+    const targetCodes = [row.substituted_by || '', row.part_code_display, row.part_code].filter(Boolean);
     const lookupRes = await lookupHondaCengkarengCatalog({
-      partCodes: [row.substituted_by || '', row.part_code_display, row.part_code].filter(Boolean),
+      partCodes: targetCodes,
       officialName: needsName ? aiInfo?.official_name : row.official_name,
       keywords: aiInfo?.aliases ?? [],
       maxResults: 2,
     });
     const best = lookupRes.candidates[0] || null;
+    const codeVerified = best ? isStrongPartCodeMatch(best, targetCodes) : false;
 
     const existingAliases = Array.isArray(row.aliases) ? row.aliases : [];
     const newAliases = aiInfo?.aliases ?? [];
@@ -267,7 +293,7 @@ Deno.serve(async (req: Request) => {
       if (aiInfo?.official_name && !aiInfo.official_name.startsWith('KODE PENGGANTI')) {
         resolvedName = aiInfo.official_name;
         patch.official_name = resolvedName;
-      } else if (best?.title && best.title.length >= 4) {
+      } else if (codeVerified && best?.title && best.title.length >= 4) {
         resolvedName = best.title.toUpperCase();
         patch.official_name = resolvedName;
       }
@@ -279,6 +305,7 @@ Deno.serve(async (req: Request) => {
 
     let didUpdatePrice = false;
     if (
+      codeVerified &&
       (row.price === null || row.price_source === 'none') &&
       row.price_source !== 'warehouse' &&
       best &&
@@ -290,18 +317,25 @@ Deno.serve(async (req: Request) => {
       priceUpdated += 1;
     }
 
-    if (!row.photo_url && best?.photoUrl) {
+    if (codeVerified && !row.photo_url && best?.photoUrl) {
       patch.photo_url = best.photoUrl;
     }
-    if (!row.catalog_url && (best?.url || lookupRes.catalogSearchUrl)) {
-      patch.catalog_url = best?.url || lookupRes.catalogSearchUrl;
+    if (!row.catalog_url && ((codeVerified && best?.url) || lookupRes.catalogSearchUrl)) {
+      patch.catalog_url = (codeVerified && best?.url) || lookupRes.catalogSearchUrl;
     }
 
     if (mergedAliases.length > existingAliases.length) {
       aliasesUpdated += 1;
     }
 
-    await supabase.from('warehouse_parts').update(patch).eq('part_code', row.part_code);
+    const { error: updateErr } = await supabase
+      .from('warehouse_parts')
+      .update(patch)
+      .eq('part_code', row.part_code);
+
+    if (updateErr) {
+      continue;
+    }
 
     details.push({
       partCode: row.part_code_display,
@@ -314,10 +348,10 @@ Deno.serve(async (req: Request) => {
   const { count: remainingCount } = await supabase
     .from('warehouse_parts')
     .select('part_code', { count: 'exact', head: true })
-    .or('ai_enriched.eq.false,price.is.null,official_name.like.Kode Pengganti:%');
+    .eq('ai_enriched', false);
 
   return jsonResponse(req, {
-    processed: batch.length,
+    processed: details.length,
     priceUpdated,
     aliasesUpdated,
     remainingPending: remainingCount ?? 0,

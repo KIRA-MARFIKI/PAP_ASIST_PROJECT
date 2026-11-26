@@ -71,9 +71,11 @@ export function EditPartModal({ part, onClose, onSave }: EditPartModalProps) {
   useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !isSaving) {
+      if (e.key === 'Escape') {
         e.stopPropagation();
-        onClose();
+        if (!isSaving) {
+          onClose();
+        }
       }
     };
     document.addEventListener('keydown', handleKeyDown, true);
@@ -109,7 +111,12 @@ export function EditPartModal({ part, onClose, onSave }: EditPartModalProps) {
       if (!/^\d+$/.test(trimmedPrice)) {
         nextErrors.harga = 'Harga harus berupa angka bulat non-negatif.';
       } else {
-        parsedHarga = Number(trimmedPrice);
+        const num = Number(trimmedPrice);
+        if (num <= 0) {
+          nextErrors.harga = 'Harga harus lebih besar dari 0, atau kosongkan jika belum ada.';
+        } else {
+          parsedHarga = num;
+        }
       }
     }
 
@@ -145,12 +152,17 @@ export function EditPartModal({ part, onClose, onSave }: EditPartModalProps) {
       )
     );
 
+    const priceUnchangedFromCengkareng =
+      activePart.priceSource === 'cengkareng' &&
+      parsedHarga !== null &&
+      parsedHarga === activePart.harga;
+
     const nextPriceSource: PriceSource =
-      parsedHarga !== null && parsedHarga > 0
-        ? 'warehouse'
-        : parsedHarga === null
-          ? 'none'
-          : activePart.priceSource;
+      parsedHarga === null
+        ? 'none'
+        : priceUnchangedFromCengkareng
+          ? 'cengkareng'
+          : 'warehouse';
 
     setErrors({});
     setIsSaving(true);

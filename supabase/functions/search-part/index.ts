@@ -4,6 +4,7 @@ import {
   buildCatalogSearchUrl,
   CengkarengCandidate,
   CengkarengLookupResult,
+  isStrongPartCodeMatch,
   lookupHondaCengkarengCatalog,
   normalizePartCode,
   SideHint,
@@ -12,6 +13,7 @@ import {
 const CACHE_TTL_DAYS = 30;
 const MAX_AI_CALLS_PER_MIN_PER_IP = 15;
 const IP_WINDOW_MS = 60_000;
+const GEMINI_TIMEOUT_MS = 15_000;
 const FALLBACK_FREE_MODELS = [
   'gemini-3.5-flash-lite',
   'gemini-3.1-flash-lite',
@@ -98,6 +100,16 @@ function getClientIp(req: Request): string {
 
 function checkAndRecordIpThrottle(ip: string): boolean {
   const now = Date.now();
+  if (ipHitsMap.size > 500) {
+    for (const [key, list] of ipHitsMap.entries()) {
+      const fresh = list.filter((ts) => now - ts < IP_WINDOW_MS);
+      if (fresh.length === 0) {
+        ipHitsMap.delete(key);
+      } else {
+        ipHitsMap.set(key, fresh);
+      }
+    }
+  }
   const timestamps = (ipHitsMap.get(ip) || []).filter((ts) => now - ts < IP_WINDOW_MS);
   if (timestamps.length >= MAX_AI_CALLS_PER_MIN_PER_IP) {
     ipHitsMap.set(ip, timestamps);
@@ -106,6 +118,10 @@ function checkAndRecordIpThrottle(ip: string): boolean {
   timestamps.push(now);
   ipHitsMap.set(ip, timestamps);
   return true;
+}
+
+function escapeIlikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
 }
 
 function normalizeQuery(text: string): string {
@@ -295,6 +311,7 @@ async function callGeminiFreeTier(
             temperature: 0.1,
           },
         }),
+        signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
       });
 
       if (res.status === 429) {
@@ -368,8 +385,9 @@ async function enrichWarehouseRowsOnDemand(
       continue;
     }
 
+    const targetCodes = [row.substituted_by || '', row.part_code_display, row.part_code].filter(Boolean);
     const lookupRes = await lookupHondaCengkarengCatalog({
-      partCodes: [row.substituted_by || '', row.part_code_display, row.part_code].filter(Boolean),
+      partCodes: targetCodes,
       officialName: needsName ? undefined : row.official_name,
       maxResults: 2,
     });
@@ -383,29 +401,28 @@ async function enrichWarehouseRowsOnDemand(
 
     const patch: Record<string, unknown> = {};
     let nextRow: WarehouseRow = { ...row };
+    const codeVerified = isStrongPartCodeMatch(best, targetCodes);
 
-    if (needsPrice && row.price_source !== 'warehouse' && best.priceIdr !== null) {
+    if (codeVerified && needsPrice && row.price_source !== 'warehouse' && best.priceIdr !== null) {
       patch.price = best.priceIdr;
       patch.price_source = 'cengkareng';
       nextRow = { ...nextRow, price: best.priceIdr, price_source: 'cengkareng' };
     }
-    if (needsPhoto && best.photoUrl) {
+    if (codeVerified && needsPhoto && best.photoUrl) {
       patch.photo_url = best.photoUrl;
       nextRow = { ...nextRow, photo_url: best.photoUrl };
     }
-    if (needsName && best.title && best.title.length >= 4) {
+    if (codeVerified && needsName && best.title && best.title.length >= 4) {
       const cleanedTitle = best.title.toUpperCase();
       patch.official_name = cleanedTitle;
       nextRow = { ...nextRow, official_name: cleanedTitle };
     }
-    if (!row.catalog_url && best.url) {
+    if (codeVerified && !row.catalog_url && best.url) {
       patch.catalog_url = best.url;
       nextRow = { ...nextRow, catalog_url: best.url };
     }
 
     if (Object.keys(patch).length > 0) {
-      patch.ai_enriched = true;
-      nextRow.ai_enriched = true;
       await supabase
         .from('warehouse_parts')
         .update(patch)
@@ -428,7 +445,7 @@ function mapCatalogCandidatesToResults(
   return candidates.slice(0, 4).map((item, idx) => {
     const displayCode = item.partCodes[0] || candidateCodes[idx] || '-';
     return {
-      id: `catalog-${normalizePartCode(displayCode) || idx}`,
+      id: `catalog-${normalizePartCode(displayCode) || 'item'}-${idx}`,
       photoUrl: item.photoUrl || fallbackPhotoUrl,
       officialName: item.title ? item.title.toUpperCase() : officialName,
       partCode: displayCode,
@@ -595,7 +612,7 @@ Deno.serve(async (req: Request) => {
         const { data: codeMatches } = await supabase
           .from('warehouse_parts')
           .select('*')
-          .eq('part_code', normalizedQueryCode)
+          .or(`part_code.eq.${normalizedQueryCode},substituted_by.eq.${normalizedQueryCode}`)
           .limit(5);
 
         if (Array.isArray(codeMatches) && codeMatches.length > 0) {
@@ -612,6 +629,19 @@ Deno.serve(async (req: Request) => {
 
         if (Array.isArray(aliasMatches) && aliasMatches.length > 0) {
           directRows = aliasMatches as WarehouseRow[];
+        } else if (
+          normalizedQueryCode.length >= 5 &&
+          normalizedQueryCode.toLowerCase() !== normalizedQuery
+        ) {
+          const { data: normAliasMatches } = await supabase
+            .from('warehouse_parts')
+            .select('*')
+            .contains('aliases', [normalizedQueryCode.toLowerCase()])
+            .limit(5);
+
+          if (Array.isArray(normAliasMatches) && normAliasMatches.length > 0) {
+            directRows = normAliasMatches as WarehouseRow[];
+          }
         }
       }
 
@@ -802,7 +832,7 @@ Deno.serve(async (req: Request) => {
       const { data: nameRows } = await supabase
         .from('warehouse_parts')
         .select('*')
-        .ilike('official_name', `%${officialName}%`)
+        .ilike('official_name', `%${escapeIlikePattern(officialName)}%`)
         .limit(5);
 
       if (Array.isArray(nameRows) && nameRows.length > 0) {
@@ -891,13 +921,35 @@ Deno.serve(async (req: Request) => {
               .eq('query_normalized', normalizedQuery);
           }
 
-          mergedResults = mapCatalogCandidatesToResults(
-            cacheLookup.candidates,
-            freshCodes,
-            officialName,
-            freshPhoto,
-            freshUrl
+          const freshNormCodes = Array.from(
+            new Set(freshCodes.map(normalizePartCode).filter(Boolean))
           );
+          let freshWarehouseRows: WarehouseRow[] = [];
+          if (freshNormCodes.length > 0) {
+            const { data: recheckRows } = await supabase
+              .from('warehouse_parts')
+              .select('*')
+              .in('part_code', freshNormCodes);
+            if (Array.isArray(recheckRows) && recheckRows.length > 0) {
+              freshWarehouseRows = recheckRows as WarehouseRow[];
+            }
+          }
+
+          if (freshWarehouseRows.length > 0) {
+            const { rows: enrichedFresh } = await enrichWarehouseRowsOnDemand(
+              supabase,
+              freshWarehouseRows
+            );
+            mergedResults = mapWarehouseRowsToResults(enrichedFresh, freshPhoto, freshUrl);
+          } else {
+            mergedResults = mapCatalogCandidatesToResults(
+              cacheLookup.candidates,
+              freshCodes,
+              officialName,
+              freshPhoto,
+              freshUrl
+            );
+          }
         } else if (!sourceUrl) {
           sourceUrl = cacheLookup.catalogSearchUrl;
         }
@@ -911,7 +963,7 @@ Deno.serve(async (req: Request) => {
         sourceUrl = fallbackUrl;
         const codesToShow = candidateCodes.length > 0 ? candidateCodes.slice(0, 3) : ['-'];
         mergedResults = codesToShow.map((displayCode, idx) => ({
-          id: `catalog-${normalizePartCode(displayCode) || idx}`,
+          id: `catalog-${normalizePartCode(displayCode) || 'item'}-${idx}`,
           photoUrl: catalogPhotoUrl,
           officialName,
           partCode: displayCode,

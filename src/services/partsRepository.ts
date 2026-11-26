@@ -18,6 +18,7 @@ import {
 const PARTS_STORAGE_KEY = 'pap-asist-warehouse-parts-v1';
 const UPLOAD_HISTORY_STORAGE_KEY = 'pap-asist-upload-history-v1';
 const UPSERT_BATCH_SIZE = 500;
+const FETCH_PAGE_SIZE = 1000;
 
 interface SupabaseWarehousePartRow {
   part_code: string;
@@ -163,23 +164,37 @@ export async function fetchAllParts(): Promise<{
     };
   }
 
-  const { data, error } = await supabase
-    .from('warehouse_parts')
-    .select(
-      'part_code, part_code_display, official_name, rack_code, price, price_source, category, stock, min_stock, stock_known, substituted_by, catalog_url, ai_enriched, photo_url, aliases'
-    )
-    .order('official_name', { ascending: true });
+  const allRows: SupabaseWarehousePartRow[] = [];
+  let from = 0;
 
-  if (error) {
-    return {
-      parts: getLocalParts(),
-      dataSource: 'local',
-      notice:
-        'Tabel warehouse_parts Supabase belum dapat diakses. Jalankan migrasi SQL lalu muat ulang halaman.',
-    };
+  while (true) {
+    const { data, error } = await supabase
+      .from('warehouse_parts')
+      .select(
+        'part_code, part_code_display, official_name, rack_code, price, price_source, category, stock, min_stock, stock_known, substituted_by, catalog_url, ai_enriched, photo_url, aliases'
+      )
+      .order('official_name', { ascending: true })
+      .order('part_code', { ascending: true })
+      .range(from, from + FETCH_PAGE_SIZE - 1);
+
+    if (error) {
+      return {
+        parts: getLocalParts(),
+        dataSource: 'local',
+        notice:
+          'Tabel warehouse_parts Supabase belum dapat diakses. Jalankan migrasi SQL lalu muat ulang halaman.',
+      };
+    }
+
+    const page = (data ?? []) as SupabaseWarehousePartRow[];
+    allRows.push(...page);
+    if (page.length < FETCH_PAGE_SIZE) {
+      break;
+    }
+    from += FETCH_PAGE_SIZE;
   }
 
-  const mapped = (data as SupabaseWarehousePartRow[]).map(mapSupabasePartRow);
+  const mapped = allRows.map(mapSupabasePartRow);
   return {
     parts: mapped,
     dataSource: 'supabase',
@@ -258,7 +273,7 @@ export function findPartsByIdsOrName(
 function upsertPartsLocally(
   validRows: ParsedWarehouseRow[],
   currentParts?: PartItem[]
-): { parts: PartItem[]; storageError?: string } {
+): { parts: PartItem[]; storageError?: string; upsertFailed?: boolean } {
   const existing = [...(currentParts ?? getLocalParts())];
   const indexByKey = new Map<string, number>();
 
@@ -271,17 +286,30 @@ function upsertPartsLocally(
     if (matchIndex !== undefined) {
       const prev = existing[matchIndex];
       const keepPrevPrice = row.harga === null && prev.harga !== null;
+      const incomingIsPlaceholder = row.namaResmi.startsWith('Kode Pengganti:');
+      const prevIsPlaceholder = prev.namaResmi.startsWith('Kode Pengganti:');
+      const chosenName =
+        incomingIsPlaceholder && !prevIsPlaceholder ? prev.namaResmi : row.namaResmi;
+      const nextStockKnown = row.stockKnown || prev.stockKnown;
+      const nextMinStock = row.stockKnown
+        ? row.stokMinimum !== null
+          ? row.stokMinimum
+          : (prev.stokMinimum ?? 0)
+        : row.stokMinimum !== null
+          ? row.stokMinimum
+          : prev.stokMinimum;
+
       existing[matchIndex] = {
         ...prev,
-        namaResmi: row.namaResmi,
+        namaResmi: chosenName,
         kodePart: row.kodePart,
         kodeRak: row.kodeRak !== '-' ? row.kodeRak : prev.kodeRak,
         harga: keepPrevPrice ? prev.harga : row.harga,
         priceSource: keepPrevPrice ? prev.priceSource : row.priceSource,
         kategori: row.kategori,
         stok: row.stockKnown ? row.stok : prev.stok,
-        stokMinimum: row.stockKnown ? row.stokMinimum : prev.stokMinimum,
-        stockKnown: row.stockKnown || prev.stockKnown,
+        stokMinimum: nextMinStock,
+        stockKnown: nextStockKnown,
         substitutedBy: row.substitutedBy || prev.substitutedBy,
         aliases: Array.from(new Set([...prev.aliases, ...row.aliases])),
         aiEnriched: prev.aiEnriched || row.aiEnriched,
@@ -297,7 +325,7 @@ function upsertPartsLocally(
         priceSource: row.priceSource,
         kategori: row.kategori,
         stok: row.stok,
-        stokMinimum: row.stokMinimum,
+        stokMinimum: row.stockKnown ? (row.stokMinimum ?? 0) : null,
         stockKnown: row.stockKnown,
         substitutedBy: row.substitutedBy,
         aiEnriched: row.aiEnriched,
@@ -323,14 +351,9 @@ function upsertPartsLocally(
 export async function upsertWarehouseParts(
   validRows: ParsedWarehouseRow[],
   currentParts?: PartItem[]
-): Promise<{ parts: PartItem[]; storageError?: string }> {
+): Promise<{ parts: PartItem[]; storageError?: string; upsertFailed?: boolean }> {
   if (!isSupabaseConfigured || !supabase) {
     return upsertPartsLocally(validRows, currentParts);
-  }
-
-  const existingByKey = new Map<string, PartItem>();
-  for (const part of currentParts ?? []) {
-    existingByKey.set(normalizePartCodeKey(part.kodePart), part);
   }
 
   const dedupedMap = new Map<string, ParsedWarehouseRow>();
@@ -339,23 +362,57 @@ export async function upsertWarehouseParts(
   }
   const uniqueRows = Array.from(dedupedMap.values());
 
-  // Pertahankan harga gudang, kode rak, dan stok eksisting saat mengunggah file parsial.
+  // Mulai dari snapshot lokal lalu sinkronkan dengan baris live di Supabase agar data gudang eksisting tidak tertimpa.
+  const existingByKey = new Map<string, PartItem>();
+  for (const part of currentParts ?? []) {
+    existingByKey.set(normalizePartCodeKey(part.kodePart), part);
+  }
+
+  const incomingKeys = uniqueRows.map((row) => row.normalizedKey);
+  for (let i = 0; i < incomingKeys.length; i += UPSERT_BATCH_SIZE) {
+    const keyChunk = incomingKeys.slice(i, i + UPSERT_BATCH_SIZE);
+    const { data: liveRows, error: liveFetchErr } = await supabase
+      .from('warehouse_parts')
+      .select(
+        'part_code, part_code_display, official_name, rack_code, price, price_source, category, stock, min_stock, stock_known, substituted_by, catalog_url, ai_enriched, photo_url, aliases'
+      )
+      .in('part_code', keyChunk);
+
+    if (!liveFetchErr && Array.isArray(liveRows)) {
+      for (const liveRow of liveRows as SupabaseWarehousePartRow[]) {
+        existingByKey.set(liveRow.part_code, mapSupabasePartRow(liveRow));
+      }
+    }
+  }
+
+  // Pertahankan harga gudang, nama resmi hasil pengayaan, kode rak, dan stok eksisting saat mengunggah file parsial.
   const payload = uniqueRows.map((row) => {
     const prev = existingByKey.get(row.normalizedKey);
     const keepPrevPrice = row.harga === null && prev && prev.harga !== null;
     const keepPrevStock = !row.stockKnown && prev && prev.stockKnown;
+    const incomingIsPlaceholder = row.namaResmi.startsWith('Kode Pengganti:');
+    const prevIsPlaceholder = prev?.namaResmi.startsWith('Kode Pengganti:') ?? true;
+    const chosenName =
+      incomingIsPlaceholder && prev && !prevIsPlaceholder ? prev.namaResmi : row.namaResmi;
     const mergedAliases = Array.from(new Set([...(prev?.aliases ?? []), ...row.aliases]));
+    const nextMinStock = row.stockKnown
+      ? row.stokMinimum !== null
+        ? row.stokMinimum
+        : (prev?.stokMinimum ?? 0)
+      : keepPrevStock
+        ? prev.stokMinimum
+        : null;
 
     return {
       part_code: row.normalizedKey,
       part_code_display: row.kodePart,
-      official_name: row.namaResmi,
+      official_name: chosenName,
       rack_code: row.kodeRak !== '-' ? row.kodeRak : prev?.kodeRak || '-',
       price: keepPrevPrice ? prev.harga : row.harga,
       price_source: keepPrevPrice ? prev.priceSource : row.priceSource,
       category: row.kategori,
       stock: keepPrevStock ? prev.stok : row.stok,
-      min_stock: keepPrevStock ? prev.stokMinimum : row.stokMinimum,
+      min_stock: nextMinStock,
       stock_known: keepPrevStock ? true : row.stockKnown,
       substituted_by: row.substitutedBy || prev?.substitutedBy || null,
       aliases: mergedAliases,
@@ -370,14 +427,26 @@ export async function upsertWarehouseParts(
       .upsert(chunk, { onConflict: 'part_code' });
 
     if (error) {
+      const partialRefresh = i > 0 ? await fetchAllParts() : null;
       return {
-        parts: currentParts ?? [],
+        parts:
+          partialRefresh && partialRefresh.dataSource === 'supabase'
+            ? partialRefresh.parts
+            : (currentParts ?? []),
+        upsertFailed: true,
         storageError: `Gagal menyimpan data ke database gudang (${error.message}). Pastikan akun Anda terdaftar sebagai admin gudang lalu coba lagi.`,
       };
     }
   }
 
   const refreshed = await fetchAllParts();
+  if (refreshed.dataSource !== 'supabase') {
+    return {
+      parts: currentParts ?? [],
+      storageError:
+        'Data tersimpan ke database gudang, tetapi gagal memuat ulang daftar part terbaru. Muat ulang halaman untuk melihat pembaruan.',
+    };
+  }
   return { parts: refreshed.parts };
 }
 
@@ -609,17 +678,45 @@ export async function updateSinglePart(
       updatePatch.photo_url = uploadedPhotoUrl;
     }
 
-    const { error } = await supabase
+    const { data: updatedRows, error } = await supabase
       .from('warehouse_parts')
       .update(updatePatch)
-      .eq('part_code', normalizedKey);
+      .eq('part_code', normalizedKey)
+      .select('part_code');
 
     if (error) {
       throw new Error(`Gagal menyimpan perubahan part (${error.message}).`);
     }
 
+    if (!updatedRows || updatedRows.length === 0) {
+      throw new Error(
+        'Perubahan part tidak tersimpan. Pastikan sesi admin gudang masih aktif dan kode part masih ada di database.'
+      );
+    }
+
     const refreshed = await fetchAllParts();
-    return refreshed.parts;
+    if (refreshed.dataSource === 'supabase') {
+      return refreshed.parts;
+    }
+
+    return currentParts.map((part) => {
+      if (normalizePartCodeKey(part.id) !== normalizedKey && part.id !== payload.partCodeKey) {
+        return part;
+      }
+      return {
+        ...part,
+        namaResmi: payload.namaResmi,
+        kodeRak: payload.kodeRak || '-',
+        harga: payload.harga,
+        priceSource: payload.priceSource,
+        kategori: payload.kategori,
+        stok: payload.stockKnown ? payload.stok : null,
+        stokMinimum: payload.stockKnown ? payload.stokMinimum : null,
+        stockKnown: payload.stockKnown,
+        aliases: payload.aliases,
+        foto: uploadedPhotoUrl || part.foto,
+      };
+    });
   }
 
   const nextParts = currentParts.map((part) => {

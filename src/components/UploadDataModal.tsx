@@ -14,7 +14,7 @@ interface UploadDataModalProps {
   onProcessUpload: (
     fileName: string,
     parsed: WarehouseParseResult
-  ) => Promise<{ storageError?: string }>;
+  ) => Promise<{ saved: boolean; storageError?: string }>;
   onOpenHistory: () => void;
 }
 
@@ -188,13 +188,20 @@ export function UploadDataModal({
   };
 
   const handleConfirmSave = async () => {
-    if (!selectedFile || !previewParsed || isBusy) return;
+    if (!selectedFile || !previewParsed || previewParsed.validRows.length === 0 || isBusy) return;
     setIsSaving(true);
     setFileError('');
     setStorageWarning('');
 
     try {
       const outcome = await onProcessUpload(selectedFile.name, previewParsed);
+      if (!outcome.saved) {
+        setFileError(
+          outcome.storageError ||
+            'Gagal menyimpan data ke database gudang. Periksa koneksi lalu coba lagi.'
+        );
+        return;
+      }
       if (outcome.storageError) {
         setStorageWarning(outcome.storageError);
       }
@@ -209,10 +216,17 @@ export function UploadDataModal({
   if (!isOpen) return null;
 
   const activeParsed = savedSummary?.parsed ?? previewParsed;
-  const hasPartialColumns = Boolean(
-    activeParsed &&
-    (activeParsed.missingRack || activeParsed.missingPrice || activeParsed.missingStock)
-  );
+  const partialNotes: string[] = [];
+  if (activeParsed?.missingRack) {
+    partialNotes.push("kolom kode rak tidak ditemukan (diisi '-')");
+  }
+  if (activeParsed?.missingPrice) {
+    partialNotes.push('kolom harga tidak ditemukan (dapat dilengkapi dari referensi Honda Cengkareng)');
+  }
+  if (activeParsed?.missingStock) {
+    partialNotes.push('kolom stok tidak ditemukan (status stok ditandai Belum Diatur)');
+  }
+  const hasPartialColumns = partialNotes.length > 0;
 
   return (
     <div
@@ -404,7 +418,7 @@ export function UploadDataModal({
 
                 {hasPartialColumns && (
                   <p className="rounded-[6px] border border-[#E4E4E7] bg-[#FAFAFA] px-3 py-2 text-xs text-[#3F3F46]">
-                    Kolom kode rak diisi &apos;-&apos;, harga akan dilengkapi dari referensi Honda Cengkareng, dan status stok ditandai Belum Diatur sampai data stok gudang diunggah.
+                    Impor parsial terdeteksi: {partialNotes.join('; ')}. Data gudang eksisting yang sudah ada tetap dipertahankan.
                   </p>
                 )}
 
@@ -468,14 +482,22 @@ export function UploadDataModal({
             <button
               type="button"
               onClick={handleConfirmSave}
-              disabled={!selectedFile || !previewParsed || isBusy || Boolean(savedSummary)}
+              disabled={
+                !selectedFile ||
+                !previewParsed ||
+                previewParsed.validRows.length === 0 ||
+                isBusy ||
+                Boolean(savedSummary)
+              }
               className="min-h-[44px] w-full cursor-pointer rounded-[8px] bg-[#CC0000] px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#CC0000]"
             >
               {isSaving
                 ? 'Memproses dan menyimpan data gudang...'
                 : savedSummary
                   ? 'Data Sudah Disimpan'
-                  : 'Konfirmasi & Simpan ke Gudang'}
+                  : previewParsed && previewParsed.validRows.length === 0
+                    ? 'Tidak Ada Data Valid untuk Disimpan'
+                    : 'Konfirmasi & Simpan ke Gudang'}
             </button>
           </div>
         </div>

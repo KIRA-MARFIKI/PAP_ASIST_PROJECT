@@ -221,6 +221,10 @@ export function AdminCredentialsModal({
         return;
       }
 
+      if (trimmedEmail || newPassword) {
+        await supabase.auth.refreshSession().catch(() => {});
+      }
+
       if (data.email) {
         onCredentialsUpdated(data.email);
       }

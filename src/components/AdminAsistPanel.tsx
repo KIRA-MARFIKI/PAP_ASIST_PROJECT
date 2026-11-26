@@ -7,7 +7,7 @@ import {
   SinglePartUpdatePayload,
   StockStatus,
 } from '../types/part';
-import { formatRupiah, getStockStatus } from '../services/partsRepository';
+import { formatRupiah, getStockStatus, normalizePartCodeKey } from '../services/partsRepository';
 import { AdminSession } from './LoginModal';
 import { EditPartModal } from './EditPartModal';
 import { SurfaceWatermark } from './WatermarkOverlay';
@@ -131,32 +131,43 @@ export function AdminAsistPanel({
 
   useEffect(() => {
     if (!isOpen) return;
-    const indicator = tabIndicatorRef.current;
-    const targetBtn =
-      activeTab === 'all'
-        ? allTabRef.current
-        : activeTab === 'fast'
-          ? fastTabRef.current
-          : slowTabRef.current;
-    if (!indicator || !targetBtn) return;
 
-    const mm = gsap.matchMedia();
-    mm.add('(prefers-reduced-motion: no-preference)', () => {
-      gsap.to(indicator, {
-        x: targetBtn.offsetLeft - 4,
-        width: targetBtn.offsetWidth,
-        duration: 0.24,
-        ease: 'power2.out',
-      });
-    });
-    mm.add('(prefers-reduced-motion: reduce)', () => {
-      gsap.set(indicator, {
-        x: targetBtn.offsetLeft - 4,
-        width: targetBtn.offsetWidth,
-      });
-    });
+    const updateIndicator = (animate: boolean) => {
+      const indicator = tabIndicatorRef.current;
+      const targetBtn =
+        activeTab === 'all'
+          ? allTabRef.current
+          : activeTab === 'fast'
+            ? fastTabRef.current
+            : slowTabRef.current;
+      if (!indicator || !targetBtn) return;
 
-    return () => mm.revert();
+      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      gsap.killTweensOf(indicator);
+      if (!animate || reduceMotion) {
+        gsap.set(indicator, {
+          x: targetBtn.offsetLeft - 4,
+          width: targetBtn.offsetWidth,
+        });
+      } else {
+        gsap.to(indicator, {
+          x: targetBtn.offsetLeft - 4,
+          width: targetBtn.offsetWidth,
+          duration: 0.24,
+          ease: 'power2.out',
+        });
+      }
+    };
+
+    updateIndicator(true);
+    const handleResize = () => updateIndicator(false);
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      if (tabIndicatorRef.current) {
+        gsap.killTweensOf(tabIndicatorRef.current);
+      }
+    };
   }, [activeTab, isOpen]);
 
   const summary = useMemo(() => {
@@ -180,11 +191,7 @@ export function AdminAsistPanel({
       if (part.harga === null) {
         missingPriceCount += 1;
       }
-      if (
-        !part.aiEnriched ||
-        part.harga === null ||
-        part.namaResmi.startsWith('Kode Pengganti:')
-      ) {
+      if (!part.aiEnriched) {
         pendingEnrichCount += 1;
       }
     }
@@ -201,6 +208,7 @@ export function AdminAsistPanel({
 
   const filteredParts = useMemo(() => {
     const keyword = filterText.trim().toLowerCase();
+    const normalizedKey = normalizePartCodeKey(filterText);
     return parts.filter((part) => {
       if (activeTab !== 'all' && part.kategori !== activeTab) return false;
       const partStatus = getStockStatus(part);
@@ -209,6 +217,7 @@ export function AdminAsistPanel({
       return (
         part.namaResmi.toLowerCase().includes(keyword) ||
         part.kodePart.toLowerCase().includes(keyword) ||
+        (normalizedKey.length >= 3 && normalizePartCodeKey(part.kodePart).includes(normalizedKey)) ||
         part.kodeRak.toLowerCase().includes(keyword) ||
         part.aliases.some((alias) => alias.toLowerCase().includes(keyword))
       );

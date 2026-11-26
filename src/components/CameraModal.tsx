@@ -22,6 +22,7 @@ export function CameraModal({
   const [facingMode, setFacingMode] = useState<FacingMode>('environment');
   const [hasMultipleCameras, setHasMultipleCameras] = useState(false);
   const [isInitializing, setIsInitializing] = useState(false);
+  const [isCapturing, setIsCapturing] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
 
   const backdropRef = useRef<HTMLDivElement>(null);
@@ -29,6 +30,13 @@ export function CameraModal({
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const isClosingRef = useRef(false);
+  const onCloseRef = useRef(onClose);
+  const onFallbackInputRef = useRef(onFallbackInput);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+    onFallbackInputRef.current = onFallbackInput;
+  }, [onClose, onFallbackInput]);
 
   // Hentikan seluruh MediaStreamTrack agar kamera tidak tetap menyala di latar belakang.
   const stopActiveStream = useCallback(() => {
@@ -138,13 +146,14 @@ export function CameraModal({
 
     if (!canUseGetUserMedia) {
       stopActiveStream();
-      onClose();
-      onFallbackInput();
+      onCloseRef.current();
+      onFallbackInputRef.current();
       return;
     }
 
     let cancelled = false;
     setIsInitializing(true);
+    setIsCapturing(false);
     setErrorMessage('');
     stopActiveStream();
 
@@ -163,6 +172,7 @@ export function CameraModal({
         streamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
+          void videoRef.current.play().catch(() => {});
         }
 
         try {
@@ -203,35 +213,41 @@ export function CameraModal({
       cancelled = true;
       stopActiveStream();
     };
-  }, [isOpen, facingMode, onClose, onFallbackInput, stopActiveStream]);
+  }, [isOpen, facingMode, stopActiveStream]);
 
   const handleTakePhoto = async () => {
+    if (isCapturing || isClosingRef.current) return;
     const video = videoRef.current;
     if (!video || video.videoWidth === 0 || video.videoHeight === 0) return;
 
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    setIsCapturing(true);
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
 
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    await applyWatermarkToCanvas(canvas);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      await applyWatermarkToCanvas(canvas);
 
-    canvas.toBlob(
-      (blob) => {
-        if (!blob) return;
-        const file = new File([blob], `kamera-part-${Date.now()}.jpg`, {
-          type: 'image/jpeg',
-        });
-        stopActiveStream();
-        onCapture(file);
-        onClose();
-      },
-      'image/jpeg',
-      0.9
-    );
+      if (isClosingRef.current) return;
+
+      const blob = await new Promise<Blob | null>((resolve) =>
+        canvas.toBlob(resolve, 'image/jpeg', 0.9)
+      );
+      if (!blob || isClosingRef.current) return;
+
+      const file = new File([blob], `kamera-part-${Date.now()}.jpg`, {
+        type: 'image/jpeg',
+      });
+      stopActiveStream();
+      onCapture(file);
+      onClose();
+    } finally {
+      setIsCapturing(false);
+    }
   };
 
   const handleToggleCamera = () => {
@@ -319,10 +335,10 @@ export function CameraModal({
               <button
                 type="button"
                 onClick={handleTakePhoto}
-                disabled={isInitializing || Boolean(errorMessage)}
+                disabled={isInitializing || isCapturing || Boolean(errorMessage)}
                 className="min-h-[44px] cursor-pointer rounded-[8px] bg-[#CC0000] px-4 py-2 text-xs sm:text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#CC0000]"
               >
-                Ambil Foto
+                {isCapturing ? 'Memproses...' : 'Ambil Foto'}
               </button>
             </div>
           </div>

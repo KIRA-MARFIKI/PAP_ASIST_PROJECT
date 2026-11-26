@@ -50,8 +50,8 @@ export function SearchHistory({ items, isOpen, onSelect, onClear }: SearchHistor
               onMouseDown={(e) => {
                 // Mencegah input blur sebelum klik item riwayat diproses
                 e.preventDefault();
-                onSelect(item);
               }}
+              onClick={() => onSelect(item)}
               className="flex min-h-[44px] w-full cursor-pointer items-center gap-3 px-4 py-2 text-left text-sm text-[#18181B] transition-colors hover:bg-[#F4F4F5] focus-visible:outline-2 focus-visible:outline-inset focus-visible:outline-[#CC0000]"
             >
               <History size={16} strokeWidth={1.75} aria-hidden="true" className="shrink-0 text-[#52525B]" />
@@ -65,8 +65,8 @@ export function SearchHistory({ items, isOpen, onSelect, onClear }: SearchHistor
           type="button"
           onMouseDown={(e) => {
             e.preventDefault();
-            onClear();
           }}
+          onClick={onClear}
           aria-label="Hapus riwayat pencarian"
           title="Hapus riwayat pencarian"
           className="flex min-h-[44px] min-w-[44px] cursor-pointer items-center justify-center rounded-[8px] text-[#CC0000] transition-colors hover:bg-[#FEF2F2] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#CC0000]"

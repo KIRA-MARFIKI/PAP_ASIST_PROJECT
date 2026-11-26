@@ -58,7 +58,14 @@ export function SearchBar({
   };
 
   return (
-    <div className="relative w-full">
+    <div
+      className="relative w-full"
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+          onBlurInput();
+        }
+      }}
+    >
       <form
         onSubmit={handleFormSubmit}
         className="flex min-h-[52px] w-full items-center gap-1 rounded-full border border-[#D4D4D8] bg-white px-1.5 sm:px-2 transition-colors focus-within:border-[#CC0000]"
@@ -98,7 +105,6 @@ export function SearchBar({
           value={query}
           onChange={(e) => onQueryChange(e.target.value)}
           onFocus={onFocusInput}
-          onBlur={onBlurInput}
           placeholder="Search your part"
           aria-label="Search your part"
           className="min-w-0 flex-1 bg-transparent pr-1 text-sm sm:text-[15px] text-[#18181B] placeholder:text-[#71717A] focus:outline-none"
