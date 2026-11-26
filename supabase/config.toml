@@ -1,0 +1,10 @@
+project_id = "cspymvmepudjexjjhrtd"
+
+[functions.search-part]
+verify_jwt = false
+
+[functions.update-admin-credentials]
+verify_jwt = false
+
+[functions.enrich-parts]
+verify_jwt = false
