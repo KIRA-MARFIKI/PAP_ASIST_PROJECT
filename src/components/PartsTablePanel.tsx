@@ -222,7 +222,9 @@ export function PartsTablePanel({ isOpen, parts, onClose }: PartsTablePanelProps
                       colSpan={7}
                       className="px-4 py-10 text-center text-sm text-[#52525B]"
                     >
-                      Tidak ada part yang cocok dengan filter.
+                      {parts.length === 0
+                        ? 'Belum ada data part di gudang. Masuk ke Admin Asist lalu unggah file Excel/CSV data gudang.'
+                        : 'Tidak ada part yang cocok dengan filter.'}
                     </td>
                   </tr>
                 ) : (

@@ -1,5 +1,9 @@
-import { createPartPlaceholder } from '../data/partsData';
-import { isSupabaseConfigured, supabase } from '../lib/supabase';
+import {
+  isSupabaseConfigured,
+  supabase,
+  SUPABASE_CONFIG_ERROR_MESSAGE,
+} from '../lib/supabase';
+import { createPartPlaceholder } from '../utils/partPlaceholder';
 import {
   PartItem,
   SearchPartResponse,
@@ -7,7 +11,6 @@ import {
   WarehouseStockStatus,
 } from '../types/part';
 import {
-  getAllParts,
   normalizePartCodeKey,
   partItemToSearchResult,
 } from './partsRepository';
@@ -53,94 +56,6 @@ interface EdgeSearchResponse {
   message?: string;
   retryAfterSeconds?: number;
   error?: string;
-}
-
-function normalizeText(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function searchLocally(query: string, catalog: PartItem[]): SearchPartResponse {
-  const normalizedQuery = normalizeText(query);
-  const normalizedKey = normalizePartCodeKey(query);
-
-  if (!normalizedQuery) {
-    return {
-      isHondaPart: true,
-      translatedQuery: query.trim().toUpperCase(),
-      source: 'local',
-      results: [],
-    };
-  }
-
-  const exactPart = catalog.find(
-    (part) =>
-      (normalizedKey.length > 0 && normalizePartCodeKey(part.kodePart) === normalizedKey) ||
-      normalizeText(part.namaResmi) === normalizedQuery
-  );
-
-  if (exactPart) {
-    return {
-      isHondaPart: true,
-      translatedQuery: exactPart.namaResmi,
-      source: 'local',
-      results: [partItemToSearchResult(exactPart)],
-    };
-  }
-
-  const scored = catalog
-    .map((part) => {
-      let bestScore = 0;
-      const normName = normalizeText(part.namaResmi);
-
-      if (normalizedQuery.length >= 3 && normName.includes(normalizedQuery)) {
-        bestScore = Math.max(bestScore, 80);
-      }
-
-      for (const alias of part.aliases) {
-        const normAlias = normalizeText(alias);
-        if (normAlias === normalizedQuery) {
-          bestScore = Math.max(bestScore, 100);
-        } else if (
-          normalizedQuery.length >= 3 &&
-          (normAlias.includes(normalizedQuery) || normalizedQuery.includes(normAlias))
-        ) {
-          bestScore = Math.max(bestScore, 70);
-        } else {
-          const queryTokens = normalizedQuery.split(' ').filter((t) => t.length >= 3);
-          const aliasTokens = normAlias.split(' ');
-          const overlap = queryTokens.filter((t) => aliasTokens.includes(t)).length;
-          if (overlap > 0 && overlap >= Math.ceil(queryTokens.length * 0.6)) {
-            bestScore = Math.max(bestScore, 40 + overlap * 10);
-          }
-        }
-      }
-
-      return { part, score: bestScore };
-    })
-    .filter((item) => item.score > 0)
-    .sort((a, b) => b.score - a.score);
-
-  if (scored.length > 0) {
-    const topScore = scored[0].score;
-    const topMatches = scored.filter((item) => item.score >= Math.max(60, topScore - 15));
-    return {
-      isHondaPart: true,
-      translatedQuery: topMatches[0].part.namaResmi,
-      source: 'local',
-      results: topMatches.map((item) => partItemToSearchResult(item.part)),
-    };
-  }
-
-  return {
-    isHondaPart: true,
-    translatedQuery: query.trim().toUpperCase(),
-    source: 'local',
-    results: [],
-  };
 }
 
 // Kompres foto ke maksimum 1024px JPEG sebelum encoding base64 agar unggahan cepat di jaringan gudang.
@@ -195,24 +110,24 @@ function mapEdgeResponse(data: EdgeSearchResponse, fallbackQuery: string): Searc
 
   const results: SearchResultItem[] = Array.isArray(data.results)
     ? data.results.map((item) => ({
-      id: item.id,
-      foto: item.photoUrl || createPartPlaceholder(item.officialName),
-      namaResmi: item.officialName,
-      kodePart: item.partCode,
-      kodeRak: item.rackCode || '-',
-      harga: item.price,
-      priceSource:
-        item.priceSource ??
-        (item.price !== null ? (item.inWarehouse ? 'warehouse' : 'cengkareng') : 'none'),
-      stok: item.stock ?? null,
-      stokMinimum: item.minStock ?? null,
-      stockKnown: Boolean(item.stockKnown),
-      substitutedBy: item.substitutedBy ?? null,
-      inWarehouse: item.inWarehouse,
-      stockStatus: item.stockStatus,
-      statusLabel: item.statusLabel ?? null,
-      sourceUrl: item.sourceUrl ?? null,
-    }))
+        id: item.id,
+        foto: item.photoUrl || createPartPlaceholder(item.officialName),
+        namaResmi: item.officialName,
+        kodePart: item.partCode,
+        kodeRak: item.rackCode || '-',
+        harga: item.price,
+        priceSource:
+          item.priceSource ??
+          (item.price !== null ? (item.inWarehouse ? 'warehouse' : 'cengkareng') : 'none'),
+        stok: item.stock ?? null,
+        stokMinimum: item.minStock ?? null,
+        stockKnown: Boolean(item.stockKnown),
+        substitutedBy: item.substitutedBy ?? null,
+        inWarehouse: item.inWarehouse,
+        stockStatus: item.stockStatus,
+        statusLabel: item.statusLabel ?? null,
+        sourceUrl: item.sourceUrl ?? null,
+      }))
     : [];
 
   return {
@@ -226,15 +141,15 @@ function mapEdgeResponse(data: EdgeSearchResponse, fallbackQuery: string): Searc
 }
 
 /**
- * Semua panggilan Gemini API dijalankan secara eksklusif melalui Supabase Edge Function `search-part`.
+ * Semua panggilan Gemini API dan katalog dijalankan secara eksklusif melalui Supabase Edge Function `search-part`.
  */
 async function invokeEdgeSearch(payload: {
   query?: string;
   imageBase64?: string;
   mimeType?: string;
-}): Promise<EdgeSearchResponse | null> {
+}): Promise<EdgeSearchResponse> {
   if (!isSupabaseConfigured || !supabase) {
-    return null;
+    throw new AiSearchError(SUPABASE_CONFIG_ERROR_MESSAGE, 0);
   }
 
   const { data, error } = await supabase.functions.invoke<EdgeSearchResponse>('search-part', {
@@ -246,7 +161,10 @@ async function invokeEdgeSearch(payload: {
     if (errContext && typeof errContext.status === 'number') {
       const status = errContext.status;
       if (status === 404) {
-        return null;
+        throw new AiSearchError(
+          'Layanan pencarian AI (Edge Function search-part) belum terpasang di Supabase. Jalankan deploy function lalu coba lagi.',
+          30
+        );
       }
       try {
         const parsedErr = (await errContext.json()) as {
@@ -290,21 +208,27 @@ async function invokeEdgeSearch(payload: {
     );
   }
 
-  return data ?? null;
+  if (!data) {
+    throw new AiSearchError(
+      'Server pencarian AI mengembalikan respons kosong. Silakan coba beberapa saat lagi.',
+      30
+    );
+  }
+
+  return data;
 }
 
 export async function searchPartWithText(
   query: string,
-  activeParts?: PartItem[]
+  activeParts: PartItem[] = []
 ): Promise<SearchPartResponse> {
-  const catalog = activeParts ?? getAllParts();
   const trimmed = query.trim();
 
-  // Hemat kuota Edge Function bila user memasukkan kode part persis yang ada di gudang & sudah punya harga
+  // Hemat kuota Edge Function bila user memasukkan kode part persis dari data gudang Supabase asli yang sudah memiliki harga
   const normalizedTrimmedKey = normalizePartCodeKey(trimmed);
   const exactCodeMatch =
-    normalizedTrimmedKey.length >= 5
-      ? catalog.find(
+    normalizedTrimmedKey.length >= 5 && activeParts.length > 0
+      ? activeParts.find(
           (part) =>
             normalizePartCodeKey(part.kodePart) === normalizedTrimmedKey &&
             part.harga !== null
@@ -314,25 +238,19 @@ export async function searchPartWithText(
     return {
       isHondaPart: true,
       translatedQuery: exactCodeMatch.namaResmi,
-      source: 'local',
+      source: 'warehouse-direct',
       results: [partItemToSearchResult(exactCodeMatch)],
     };
   }
 
   const edgeData = await invokeEdgeSearch({ query: trimmed });
-  if (edgeData) {
-    return mapEdgeResponse(edgeData, trimmed);
-  }
-
-  return searchLocally(trimmed, catalog);
+  return mapEdgeResponse(edgeData, trimmed);
 }
 
 export async function searchPartWithImage(
   file: File,
-  optionalHint?: string,
-  activeParts?: PartItem[]
+  optionalHint?: string
 ): Promise<SearchPartResponse> {
-  const catalog = activeParts ?? getAllParts();
   const { base64, mimeType } = await compressImageToBase64(file);
 
   const edgeData = await invokeEdgeSearch({
@@ -341,32 +259,5 @@ export async function searchPartWithImage(
     mimeType,
   });
 
-  if (edgeData) {
-    return mapEdgeResponse(edgeData, optionalHint || 'HASIL FOTO PART');
-  }
-
-  const combinedHint = `${optionalHint ?? ''} ${file.name.replace(/\.[^.]+$/, '')}`;
-  const localMatch = searchLocally(combinedHint, catalog);
-  if (localMatch.results.length > 0) {
-    return localMatch;
-  }
-
-  if (catalog.length > 0) {
-    const fallbackPart = catalog[0];
-    return {
-      isHondaPart: true,
-      translatedQuery: fallbackPart.namaResmi,
-      source: 'local',
-      visualNotes:
-        'Mode fallback lokal aktif. Hubungkan Supabase untuk pengenalan foto AI.',
-      results: [partItemToSearchResult(fallbackPart)],
-    };
-  }
-
-  return {
-    isHondaPart: true,
-    translatedQuery: 'FOTO PART',
-    source: 'local',
-    results: [],
-  };
+  return mapEdgeResponse(edgeData, optionalHint || 'HASIL FOTO PART');
 }

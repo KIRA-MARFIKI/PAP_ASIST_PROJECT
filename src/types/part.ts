@@ -52,7 +52,7 @@ export interface SearchPartResponse {
   rejectionTitle?: string;
   rejectionMessage?: string;
   translatedQuery: string;
-  source: 'warehouse-direct' | 'gemini-free' | 'catalog-cache' | 'local';
+  source: 'warehouse-direct' | 'gemini-free' | 'catalog-cache';
   confidence?: 'high' | 'medium' | 'low';
   visualNotes?: string | null;
   results: SearchResultItem[];

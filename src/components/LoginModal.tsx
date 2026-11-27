@@ -74,15 +74,6 @@ export function LoginModal({
   const dialogRef = useRef<HTMLDivElement>(null);
   const captchaCanvasRef = useRef<HTMLCanvasElement>(null);
   const isClosingRef = useRef(false);
-  const fallbackTimerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (fallbackTimerRef.current !== null) {
-        window.clearTimeout(fallbackTimerRef.current);
-      }
-    };
-  }, []);
 
   const drawCaptcha = useCallback((code: string) => {
     const canvas = captchaCanvasRef.current;
@@ -268,85 +259,79 @@ export function LoginModal({
     }
 
     setErrors({});
-    setIsSubmitting(true);
 
-    if (isSupabaseConfigured && supabase) {
-      onAuthFlowBusyChange?.(true);
-      let passwordSignedIn = false;
-      let pinFullyVerified = false;
-      try {
-        const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-          email: trimmedEmail,
-          password,
-        });
-
-        if (authError || !authData.user) {
-          refreshCaptcha();
-          setErrors({
-            form: 'Email atau password tidak sesuai. Periksa kembali akun admin Anda lalu coba lagi.',
-          });
-          return;
-        }
-
-        passwordSignedIn = true;
-
-        const { data: pinData, error: pinError } = await supabase.rpc('verify_admin_pin', {
-          p_pin: pin,
-          p_full_name: trimmedNama,
-        });
-
-        const parsedPin = pinData as VerifyPinResponse | null;
-
-        if (pinError || !parsedPin?.verified) {
-          // Segera akhiri sesi Auth bila PIN 12 digit gagal agar tidak ada sesi setengah terverifikasi.
-          await supabase.auth.signOut();
-          passwordSignedIn = false;
-          refreshCaptcha();
-          const reason = parsedPin?.reason || 'PIN 12 digit tidak valid atau akun belum terdaftar sebagai admin gudang.';
-          if (reason.toLowerCase().includes('nama')) {
-            setErrors({ nama: reason });
-          } else {
-            setErrors({ pin: reason });
-          }
-          return;
-        }
-
-        pinFullyVerified = true;
-        onLoginSuccess({
-          userId: authData.user.id,
-          nama: parsedPin.full_name || REQUIRED_ADMIN_NAME,
-          email: parsedPin.email || authData.user.email || trimmedEmail,
-          role: parsedPin.role || 'warehouse_admin',
-        });
-        setPassword('');
-        setPin('');
-        setCaptchaInput('');
-        onClose();
-      } catch {
-        if (passwordSignedIn && !pinFullyVerified) {
-          await supabase.auth.signOut().catch(() => {});
-        }
-        refreshCaptcha();
-        setErrors({
-          form: 'Gagal terhubung ke layanan autentikasi Supabase. Periksa koneksi internet lalu coba lagi.',
-        });
-      } finally {
-        setIsSubmitting(false);
-        onAuthFlowBusyChange?.(false);
-      }
+    if (!isSupabaseConfigured || !supabase) {
+      refreshCaptcha();
+      setErrors({
+        form: 'Konfigurasi Supabase belum tersedia. Login admin memerlukan koneksi server aktif.',
+      });
       return;
     }
 
-    // Mode fallback lokal saat variabel environment Supabase belum diatur.
-    fallbackTimerRef.current = window.setTimeout(() => {
-      fallbackTimerRef.current = null;
-      setIsSubmitting(false);
-      onLoginSuccess({ nama: trimmedNama, email: trimmedEmail, role: 'warehouse_admin' });
+    setIsSubmitting(true);
+    onAuthFlowBusyChange?.(true);
+    let passwordSignedIn = false;
+    let pinFullyVerified = false;
+    try {
+      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+        email: trimmedEmail,
+        password,
+      });
+
+      if (authError || !authData.user) {
+        refreshCaptcha();
+        setErrors({
+          form: 'Email atau password tidak sesuai. Periksa kembali akun admin Anda lalu coba lagi.',
+        });
+        return;
+      }
+
+      passwordSignedIn = true;
+
+      const { data: pinData, error: pinError } = await supabase.rpc('verify_admin_pin', {
+        p_pin: pin,
+        p_full_name: trimmedNama,
+      });
+
+      const parsedPin = pinData as VerifyPinResponse | null;
+
+      if (pinError || !parsedPin?.verified) {
+        // Segera akhiri sesi Auth bila PIN 12 digit gagal agar tidak ada sesi setengah terverifikasi.
+        await supabase.auth.signOut();
+        passwordSignedIn = false;
+        refreshCaptcha();
+        const reason = parsedPin?.reason || 'PIN 12 digit tidak valid atau akun belum terdaftar sebagai admin gudang.';
+        if (reason.toLowerCase().includes('nama')) {
+          setErrors({ nama: reason });
+        } else {
+          setErrors({ pin: reason });
+        }
+        return;
+      }
+
+      pinFullyVerified = true;
+      onLoginSuccess({
+        userId: authData.user.id,
+        nama: parsedPin.full_name || REQUIRED_ADMIN_NAME,
+        email: parsedPin.email || authData.user.email || trimmedEmail,
+        role: parsedPin.role || 'warehouse_admin',
+      });
       setPassword('');
       setPin('');
       setCaptchaInput('');
       onClose();
-    }, 350);
+    } catch {
+      if (passwordSignedIn && !pinFullyVerified) {
+        await supabase.auth.signOut().catch(() => {});
+      }
+      refreshCaptcha();
+      setErrors({
+        form: 'Gagal terhubung ke layanan autentikasi Supabase. Periksa koneksi internet lalu coba lagi.',
+      });
+    } finally {
+      setIsSubmitting(false);
+      onAuthFlowBusyChange?.(false);
+    }
   };
 
   if (!isOpen) return null;

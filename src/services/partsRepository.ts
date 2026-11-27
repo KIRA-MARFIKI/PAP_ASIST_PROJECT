@@ -1,5 +1,9 @@
-import { createPartPlaceholder, DUMMY_PARTS } from '../data/partsData';
-import { isSupabaseConfigured, supabase } from '../lib/supabase';
+import {
+  isSupabaseConfigured,
+  supabase,
+  SUPABASE_CONFIG_ERROR_MESSAGE,
+} from '../lib/supabase';
+import { createPartPlaceholder } from '../utils/partPlaceholder';
 import { applyWatermarkToImageFile } from '../utils/watermark';
 import {
   EnrichBatchResult,
@@ -15,8 +19,6 @@ import {
   WarehouseStockStatus,
 } from '../types/part';
 
-const PARTS_STORAGE_KEY = 'pap-asist-warehouse-parts-v1';
-const UPLOAD_HISTORY_STORAGE_KEY = 'pap-asist-upload-history-v1';
 const UPSERT_BATCH_SIZE = 500;
 const FETCH_PAGE_SIZE = 1000;
 
@@ -132,35 +134,14 @@ function mapSupabasePartRow(row: SupabaseWarehousePartRow): PartItem {
   };
 }
 
-function getLocalParts(): PartItem[] {
-  try {
-    const raw = localStorage.getItem(PARTS_STORAGE_KEY);
-    if (!raw) return DUMMY_PARTS;
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed) && parsed.length > 0) {
-      return parsed as PartItem[];
-    }
-  } catch {
-    // Fallback ke data dummy bawaan bila localStorage tidak dapat dibaca.
-  }
-  return DUMMY_PARTS;
-}
-
-export function getAllParts(): PartItem[] {
-  return getLocalParts();
-}
-
 export async function fetchAllParts(): Promise<{
   parts: PartItem[];
-  dataSource: 'supabase' | 'local';
-  notice?: string;
+  error?: string;
 }> {
   if (!isSupabaseConfigured || !supabase) {
     return {
-      parts: getLocalParts(),
-      dataSource: 'local',
-      notice:
-        'Konfigurasi Supabase belum tersedia di environment lokal. Menampilkan data contoh sementara.',
+      parts: [],
+      error: SUPABASE_CONFIG_ERROR_MESSAGE,
     };
   }
 
@@ -179,10 +160,8 @@ export async function fetchAllParts(): Promise<{
 
     if (error) {
       return {
-        parts: getLocalParts(),
-        dataSource: 'local',
-        notice:
-          'Tabel warehouse_parts Supabase belum dapat diakses. Jalankan migrasi SQL lalu muat ulang halaman.',
+        parts: [],
+        error: `Gagal memuat data gudang dari Supabase (${error.message}). Periksa koneksi atau migrasi database lalu muat ulang halaman.`,
       };
     }
 
@@ -194,21 +173,18 @@ export async function fetchAllParts(): Promise<{
     from += FETCH_PAGE_SIZE;
   }
 
-  const mapped = allRows.map(mapSupabasePartRow);
   return {
-    parts: mapped,
-    dataSource: 'supabase',
+    parts: allRows.map(mapSupabasePartRow),
   };
 }
 
-export function getLowStockParts(sourceParts?: PartItem[]): {
+export function getLowStockParts(sourceParts: PartItem[]): {
   fast: PartItem[];
   slow: PartItem[];
   totalCount: number;
 } {
-  const parts = sourceParts ?? getLocalParts();
   // Hanya sertakan part yang stoknya benar-benar diketahui agar impor parsial tidak memicu alarm palsu.
-  const lowStock = parts.filter(
+  const lowStock = sourceParts.filter(
     (part) =>
       part.stockKnown &&
       part.stok !== null &&
@@ -228,132 +204,16 @@ export function getLowStockParts(sourceParts?: PartItem[]): {
   };
 }
 
-export function findPartsByIdsOrName(
-  matchedIds: string[],
-  officialName: string,
-  rawQuery?: string,
-  sourceParts?: PartItem[]
-): PartItem[] {
-  const parts = sourceParts ?? getLocalParts();
-  const byId = matchedIds
-    .map((id) => parts.find((p) => p.id === id))
-    .filter((p): p is PartItem => Boolean(p));
-
-  if (byId.length > 0) {
-    return byId;
-  }
-
-  const normalizedOfficial = officialName.trim().toLowerCase();
-  const normalizedRaw = rawQuery?.trim().toLowerCase() ?? '';
-  const normalizedRawKey = normalizePartCodeKey(rawQuery ?? '');
-
-  return parts.filter((part) => {
-    const name = part.namaResmi.toLowerCase();
-    const code = part.kodePart.toLowerCase();
-    const codeKey = normalizePartCodeKey(part.kodePart);
-    if (normalizedRawKey && codeKey === normalizedRawKey) {
-      return true;
-    }
-    if (normalizedOfficial && (name.includes(normalizedOfficial) || normalizedOfficial.includes(name))) {
-      return true;
-    }
-    if (normalizedRaw && (name.includes(normalizedRaw) || code.includes(normalizedRaw))) {
-      return true;
-    }
-    return part.aliases.some((alias) => {
-      const a = alias.toLowerCase();
-      return (
-        (normalizedRaw && (a.includes(normalizedRaw) || normalizedRaw.includes(a))) ||
-        (normalizedOfficial && a.includes(normalizedOfficial))
-      );
-    });
-  });
-}
-
-function upsertPartsLocally(
-  validRows: ParsedWarehouseRow[],
-  currentParts?: PartItem[]
-): { parts: PartItem[]; storageError?: string; upsertFailed?: boolean } {
-  const existing = [...(currentParts ?? getLocalParts())];
-  const indexByKey = new Map<string, number>();
-
-  existing.forEach((part, idx) => {
-    indexByKey.set(normalizePartCodeKey(part.kodePart), idx);
-  });
-
-  for (const row of validRows) {
-    const matchIndex = indexByKey.get(row.normalizedKey);
-    if (matchIndex !== undefined) {
-      const prev = existing[matchIndex];
-      const keepPrevPrice = row.harga === null && prev.harga !== null;
-      const incomingIsPlaceholder = row.namaResmi.startsWith('Kode Pengganti:');
-      const prevIsPlaceholder = prev.namaResmi.startsWith('Kode Pengganti:');
-      const chosenName =
-        incomingIsPlaceholder && !prevIsPlaceholder ? prev.namaResmi : row.namaResmi;
-      const nextStockKnown = row.stockKnown || prev.stockKnown;
-      const nextMinStock = row.stockKnown
-        ? row.stokMinimum !== null
-          ? row.stokMinimum
-          : (prev.stokMinimum ?? 0)
-        : row.stokMinimum !== null
-          ? row.stokMinimum
-          : prev.stokMinimum;
-
-      existing[matchIndex] = {
-        ...prev,
-        namaResmi: chosenName,
-        kodePart: row.kodePart,
-        kodeRak: row.kodeRak !== '-' ? row.kodeRak : prev.kodeRak,
-        harga: keepPrevPrice ? prev.harga : row.harga,
-        priceSource: keepPrevPrice ? prev.priceSource : row.priceSource,
-        kategori: row.kategori,
-        stok: row.stockKnown ? row.stok : prev.stok,
-        stokMinimum: nextMinStock,
-        stockKnown: nextStockKnown,
-        substitutedBy: row.substitutedBy || prev.substitutedBy,
-        aliases: Array.from(new Set([...prev.aliases, ...row.aliases])),
-        aiEnriched: prev.aiEnriched || row.aiEnriched,
-      };
-    } else {
-      const newPart: PartItem = {
-        id: row.normalizedKey,
-        foto: createPartPlaceholder(row.namaResmi),
-        namaResmi: row.namaResmi,
-        kodePart: row.kodePart,
-        kodeRak: row.kodeRak,
-        harga: row.harga,
-        priceSource: row.priceSource,
-        kategori: row.kategori,
-        stok: row.stok,
-        stokMinimum: row.stockKnown ? (row.stokMinimum ?? 0) : null,
-        stockKnown: row.stockKnown,
-        substitutedBy: row.substitutedBy,
-        aiEnriched: row.aiEnriched,
-        aliases: row.aliases,
-      };
-      indexByKey.set(row.normalizedKey, existing.length);
-      existing.push(newPart);
-    }
-  }
-
-  try {
-    localStorage.setItem(PARTS_STORAGE_KEY, JSON.stringify(existing));
-    return { parts: existing };
-  } catch {
-    return {
-      parts: existing,
-      storageError:
-        'Data gudang diperbarui sementara, tetapi gagal disimpan ke penyimpanan browser. Kosongkan ruang penyimpanan browser lalu coba lagi.',
-    };
-  }
-}
-
 export async function upsertWarehouseParts(
   validRows: ParsedWarehouseRow[],
-  currentParts?: PartItem[]
+  currentParts: PartItem[] = []
 ): Promise<{ parts: PartItem[]; storageError?: string; upsertFailed?: boolean }> {
   if (!isSupabaseConfigured || !supabase) {
-    return upsertPartsLocally(validRows, currentParts);
+    return {
+      parts: currentParts,
+      upsertFailed: true,
+      storageError: SUPABASE_CONFIG_ERROR_MESSAGE,
+    };
   }
 
   const dedupedMap = new Map<string, ParsedWarehouseRow>();
@@ -364,7 +224,7 @@ export async function upsertWarehouseParts(
 
   // Mulai dari snapshot lokal lalu sinkronkan dengan baris live di Supabase agar data gudang eksisting tidak tertimpa.
   const existingByKey = new Map<string, PartItem>();
-  for (const part of currentParts ?? []) {
+  for (const part of currentParts) {
     existingByKey.set(normalizePartCodeKey(part.kodePart), part);
   }
 
@@ -430,9 +290,9 @@ export async function upsertWarehouseParts(
       const partialRefresh = i > 0 ? await fetchAllParts() : null;
       return {
         parts:
-          partialRefresh && partialRefresh.dataSource === 'supabase'
+          partialRefresh && !partialRefresh.error
             ? partialRefresh.parts
-            : (currentParts ?? []),
+            : currentParts,
         upsertFailed: true,
         storageError: `Gagal menyimpan data ke database gudang (${error.message}). Pastikan akun Anda terdaftar sebagai admin gudang lalu coba lagi.`,
       };
@@ -440,9 +300,9 @@ export async function upsertWarehouseParts(
   }
 
   const refreshed = await fetchAllParts();
-  if (refreshed.dataSource !== 'supabase') {
+  if (refreshed.error) {
     return {
-      parts: currentParts ?? [],
+      parts: currentParts,
       storageError:
         'Data tersimpan ke database gudang, tetapi gagal memuat ulang daftar part terbaru. Muat ulang halaman untuk melihat pembaruan.',
     };
@@ -450,34 +310,15 @@ export async function upsertWarehouseParts(
   return { parts: refreshed.parts };
 }
 
-function getLocalUploadHistory(): { records: UploadHistoryRecord[]; error?: string } {
-  try {
-    const raw = localStorage.getItem(UPLOAD_HISTORY_STORAGE_KEY);
-    if (!raw) return { records: [] };
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return { records: [] };
-    return {
-      records: (parsed as UploadHistoryRecord[]).map((item) => ({
-        ...item,
-        duplicateMergedCount: item.duplicateMergedCount ?? 0,
-        sheetsProcessed: Array.isArray(item.sheetsProcessed) ? item.sheetsProcessed : [],
-      })),
-    };
-  } catch {
-    return {
-      records: [],
-      error:
-        'Gagal membaca riwayat upload dari penyimpanan browser. Muat ulang halaman atau periksa izin penyimpanan browser.',
-    };
-  }
-}
-
 export async function getUploadHistory(): Promise<{
   records: UploadHistoryRecord[];
   error?: string;
 }> {
   if (!isSupabaseConfigured || !supabase) {
-    return getLocalUploadHistory();
+    return {
+      records: [],
+      error: SUPABASE_CONFIG_ERROR_MESSAGE,
+    };
   }
 
   const { data, error } = await supabase
@@ -517,18 +358,10 @@ export async function recordUploadHistory(
   uploadedByUserId?: string
 ): Promise<{ records: UploadHistoryRecord[]; error?: string }> {
   if (!isSupabaseConfigured || !supabase) {
-    const { records: current } = getLocalUploadHistory();
-    const next = [record, ...current];
-    try {
-      localStorage.setItem(UPLOAD_HISTORY_STORAGE_KEY, JSON.stringify(next));
-      return { records: next };
-    } catch {
-      return {
-        records: next,
-        error:
-          'Gagal menyimpan riwayat upload ke penyimpanan browser. Kosongkan cache browser lalu coba lagi.',
-      };
-    }
+    return {
+      records: [],
+      error: SUPABASE_CONFIG_ERROR_MESSAGE,
+    };
   }
 
   const { error } = await supabase.from('stock_import_logs').insert({
@@ -556,7 +389,7 @@ export async function recordUploadHistory(
 
 export async function triggerEnrichPartsBatch(batchSize = 10): Promise<EnrichBatchResult> {
   if (!isSupabaseConfigured || !supabase) {
-    throw new Error('Supabase belum terhubung. Pengayaan AI membutuhkan koneksi server aktif.');
+    throw new Error(SUPABASE_CONFIG_ERROR_MESSAGE);
   }
 
   const { data, error } = await supabase.functions.invoke<EnrichBatchResult>('enrich-parts', {
@@ -631,95 +464,69 @@ export async function updateSinglePart(
   payload: SinglePartUpdatePayload,
   currentParts: PartItem[]
 ): Promise<PartItem[]> {
+  if (!isSupabaseConfigured || !supabase) {
+    throw new Error(SUPABASE_CONFIG_ERROR_MESSAGE);
+  }
+
   const normalizedKey = normalizePartCodeKey(payload.partCodeKey);
   let uploadedPhotoUrl: string | undefined;
 
   if (payload.photoFile) {
     const compressedBlob = await compressWatermarkedPhotoForStorage(payload.photoFile);
-    if (isSupabaseConfigured && supabase) {
-      const filePath = `${normalizedKey}.jpg`;
-      const { error: uploadErr } = await supabase.storage
-        .from('part-photos')
-        .upload(filePath, compressedBlob, {
-          contentType: 'image/jpeg',
-          upsert: true,
-        });
-
-      if (uploadErr) {
-        throw new Error(`Gagal mengunggah foto part (${uploadErr.message}).`);
-      }
-
-      const { data: publicData } = supabase.storage.from('part-photos').getPublicUrl(filePath);
-      uploadedPhotoUrl = `${publicData.publicUrl}?v=${Date.now()}`;
-    } else {
-      uploadedPhotoUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result));
-        reader.onerror = () => reject(new Error('Gagal membaca foto lokal.'));
-        reader.readAsDataURL(compressedBlob);
+    const filePath = `${normalizedKey}.jpg`;
+    const { error: uploadErr } = await supabase.storage
+      .from('part-photos')
+      .upload(filePath, compressedBlob, {
+        contentType: 'image/jpeg',
+        upsert: true,
       });
+
+    if (uploadErr) {
+      throw new Error(`Gagal mengunggah foto part (${uploadErr.message}).`);
     }
+
+    const { data: publicData } = supabase.storage.from('part-photos').getPublicUrl(filePath);
+    uploadedPhotoUrl = `${publicData.publicUrl}?v=${Date.now()}`;
   }
 
-  if (isSupabaseConfigured && supabase) {
-    const updatePatch: Record<string, unknown> = {
-      official_name: payload.namaResmi,
-      rack_code: payload.kodeRak || '-',
-      price: payload.harga,
-      price_source: payload.priceSource,
-      category: payload.kategori,
-      stock: payload.stockKnown ? payload.stok : null,
-      min_stock: payload.stockKnown ? payload.stokMinimum : null,
-      stock_known: payload.stockKnown,
-      aliases: payload.aliases,
-    };
+  const updatePatch: Record<string, unknown> = {
+    official_name: payload.namaResmi,
+    rack_code: payload.kodeRak || '-',
+    price: payload.harga,
+    price_source: payload.priceSource,
+    category: payload.kategori,
+    stock: payload.stockKnown ? payload.stok : null,
+    min_stock: payload.stockKnown ? payload.stokMinimum : null,
+    stock_known: payload.stockKnown,
+    aliases: payload.aliases,
+  };
 
-    if (uploadedPhotoUrl) {
-      updatePatch.photo_url = uploadedPhotoUrl;
-    }
-
-    const { data: updatedRows, error } = await supabase
-      .from('warehouse_parts')
-      .update(updatePatch)
-      .eq('part_code', normalizedKey)
-      .select('part_code');
-
-    if (error) {
-      throw new Error(`Gagal menyimpan perubahan part (${error.message}).`);
-    }
-
-    if (!updatedRows || updatedRows.length === 0) {
-      throw new Error(
-        'Perubahan part tidak tersimpan. Pastikan sesi admin gudang masih aktif dan kode part masih ada di database.'
-      );
-    }
-
-    const refreshed = await fetchAllParts();
-    if (refreshed.dataSource === 'supabase') {
-      return refreshed.parts;
-    }
-
-    return currentParts.map((part) => {
-      if (normalizePartCodeKey(part.id) !== normalizedKey && part.id !== payload.partCodeKey) {
-        return part;
-      }
-      return {
-        ...part,
-        namaResmi: payload.namaResmi,
-        kodeRak: payload.kodeRak || '-',
-        harga: payload.harga,
-        priceSource: payload.priceSource,
-        kategori: payload.kategori,
-        stok: payload.stockKnown ? payload.stok : null,
-        stokMinimum: payload.stockKnown ? payload.stokMinimum : null,
-        stockKnown: payload.stockKnown,
-        aliases: payload.aliases,
-        foto: uploadedPhotoUrl || part.foto,
-      };
-    });
+  if (uploadedPhotoUrl) {
+    updatePatch.photo_url = uploadedPhotoUrl;
   }
 
-  const nextParts = currentParts.map((part) => {
+  const { data: updatedRows, error } = await supabase
+    .from('warehouse_parts')
+    .update(updatePatch)
+    .eq('part_code', normalizedKey)
+    .select('part_code');
+
+  if (error) {
+    throw new Error(`Gagal menyimpan perubahan part (${error.message}).`);
+  }
+
+  if (!updatedRows || updatedRows.length === 0) {
+    throw new Error(
+      'Perubahan part tidak tersimpan. Pastikan sesi admin gudang masih aktif dan kode part masih ada di database.'
+    );
+  }
+
+  const refreshed = await fetchAllParts();
+  if (!refreshed.error) {
+    return refreshed.parts;
+  }
+
+  return currentParts.map((part) => {
     if (normalizePartCodeKey(part.id) !== normalizedKey && part.id !== payload.partCodeKey) {
       return part;
     }
@@ -737,13 +544,6 @@ export async function updateSinglePart(
       foto: uploadedPhotoUrl || part.foto,
     };
   });
-
-  try {
-    localStorage.setItem(PARTS_STORAGE_KEY, JSON.stringify(nextParts));
-  } catch {
-    // Abaikan error penyimpanan lokal
-  }
-  return nextParts;
 }
 
 export function formatRupiah(amount: number): string {

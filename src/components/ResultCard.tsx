@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { createPartPlaceholder } from '../data/partsData';
+import { createPartPlaceholder } from '../utils/partPlaceholder';
 import { SearchResultItem, WarehouseStockStatus } from '../types/part';
 import { formatRupiah } from '../services/partsRepository';
 import { SurfaceWatermark } from './WatermarkOverlay';

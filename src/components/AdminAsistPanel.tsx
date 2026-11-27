@@ -531,7 +531,9 @@ export function AdminAsistPanel({
                       colSpan={10}
                       className="px-4 py-10 text-center text-sm text-[#52525B]"
                     >
-                      Tidak ada part yang cocok dengan filter saat ini.
+                      {parts.length === 0
+                        ? 'Belum ada data part di gudang. Klik tombol Upload Data Baru di pojok kanan atas untuk mengunggah file Excel/CSV gudang.'
+                        : 'Tidak ada part yang cocok dengan filter saat ini.'}
                     </td>
                   </tr>
                 ) : (

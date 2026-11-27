@@ -25,7 +25,6 @@ import { isSupabaseConfigured, supabase } from './lib/supabase';
 import { applyWatermarkToImageFile } from './utils/watermark';
 import {
   fetchAllParts,
-  getAllParts,
   getLowStockParts,
   getUploadHistory,
   partItemToSearchResult,
@@ -89,9 +88,8 @@ export function App() {
     () => !isKnownRootPath(window.location.pathname)
   );
 
-  const [parts, setParts] = useState<PartItem[]>(() => getAllParts());
-  const [dataSource, setDataSource] = useState<'supabase' | 'local'>('local');
-  const [dataNotice, setDataNotice] = useState<string>('');
+  const [parts, setParts] = useState<PartItem[]>([]);
+  const [partsLoadError, setPartsLoadError] = useState<string>('');
   const lowStock = useMemo(() => getLowStockParts(parts), [parts]);
 
   const [uploadHistory, setUploadHistory] = useState<UploadHistoryRecord[]>([]);
@@ -145,12 +143,12 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!isSupabaseConfigured) return;
     let active = true;
     void fetchAllParts().then((res) => {
       if (!active) return;
       setParts(res.parts);
-      setDataSource(res.dataSource);
-      setDataNotice(res.notice || '');
+      setPartsLoadError(res.error || '');
     });
     return () => {
       active = false;
@@ -382,7 +380,7 @@ export function App() {
 
       try {
         const searchResponse = activeImage
-          ? await searchPartWithImage(activeImage, activeQuery, parts)
+          ? await searchPartWithImage(activeImage, activeQuery)
           : await searchPartWithText(activeQuery, parts);
 
         if (requestId !== searchRequestIdRef.current) {
@@ -624,6 +622,15 @@ export function App() {
     [parts]
   );
 
+  if (!isSupabaseConfigured) {
+    return (
+      <ErrorFallbackPage
+        mode="config"
+        onGoHome={() => window.location.reload()}
+      />
+    );
+  }
+
   if (isNotFoundRoute) {
     return (
       <ErrorFallbackPage
@@ -845,10 +852,10 @@ export function App() {
         )}
       </main>
 
-      {dataSource === 'local' && (
+      {partsLoadError && (
         <footer className="relative z-20 px-4 py-4 text-center">
-          <p className="text-xs text-[#52525B]">
-            Data contoh untuk prototype{dataNotice ? ` (${dataNotice})` : ''}
+          <p role="alert" className="text-xs font-medium text-[#CC0000]">
+            {partsLoadError}
           </p>
         </footer>
       )}
@@ -911,7 +918,7 @@ export function App() {
             onRunEnrichBatch={async () => {
               const batchRes = await triggerEnrichPartsBatch(10);
               const refreshed = await fetchAllParts();
-              if (refreshed.dataSource === 'supabase') {
+              if (!refreshed.error) {
                 setParts(refreshed.parts);
               }
               return batchRes;
