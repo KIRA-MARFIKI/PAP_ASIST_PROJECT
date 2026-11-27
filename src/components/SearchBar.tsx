@@ -68,7 +68,7 @@ export function SearchBar({
     >
       <form
         onSubmit={handleFormSubmit}
-        className="flex min-h-[52px] w-full items-center gap-1 rounded-full border border-[#D4D4D8] bg-white px-1.5 sm:px-2 transition-colors focus-within:border-[#CC0000]"
+        className="flex min-h-[52px] w-full items-center gap-1 rounded-full border border-[#E5E7EB] bg-white px-1.5 sm:px-2 transition-colors focus-within:border-[#CC0000]"
       >
         <button
           type="submit"

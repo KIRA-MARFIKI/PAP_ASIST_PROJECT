@@ -398,23 +398,25 @@ function mapWcStoreProducts(items: WcStoreProduct[]): CengkarengCandidate[] {
 
 async function queryWcStoreApi(
   paramKey: 'sku' | 'search',
-  value: string
+  value: string,
+  perPage = 5
 ): Promise<{
   candidates: CengkarengCandidate[];
   tier: 'wc-store-v1' | 'wc-store-legacy' | null;
   status: number;
 }> {
+  const safePerPage = Math.max(1, Math.min(20, Math.floor(perPage)));
   const endpoints: Array<{ url: string; tier: 'wc-store-v1' | 'wc-store-legacy' }> = [
     {
       url: `https://www.hondacengkareng.com/wp-json/wc/store/v1/products?${paramKey}=${encodeURIComponent(
         value
-      )}&per_page=5`,
+      )}&per_page=${safePerPage}`,
       tier: 'wc-store-v1',
     },
     {
       url: `https://www.hondacengkareng.com/wp-json/wc/store/products?${paramKey}=${encodeURIComponent(
         value
-      )}&per_page=5`,
+      )}&per_page=${safePerPage}`,
       tier: 'wc-store-legacy',
     },
   ];
@@ -561,7 +563,7 @@ async function fetchDetailPageMeta(url: string): Promise<{
   }
 }
 
-async function queryHtmlSearchFallback(term: string): Promise<{
+async function queryHtmlSearchFallback(term: string, maxItems = 5): Promise<{
   candidates: CengkarengCandidate[];
   status: number;
 }> {
@@ -591,7 +593,7 @@ async function queryHtmlSearchFallback(term: string): Promise<{
       const productBlockRegex = /<li[^>]*class="[^"]*product[^"]*"[^>]*>([\s\S]*?)<\/li>/gi;
       let blockMatch: RegExpExecArray | null;
 
-      while ((blockMatch = productBlockRegex.exec(html)) !== null && candidates.length < 5) {
+      while ((blockMatch = productBlockRegex.exec(html)) !== null && candidates.length < maxItems) {
         const block = blockMatch[1];
         const linkMatch = block.match(
           /href=["'](https?:\/\/(?:www\.)?hondacengkareng\.com\/(?:produk|product)\/[^"'#?]+)["']/i
@@ -774,5 +776,107 @@ export async function lookupHondaCengkarengCatalog(
     httpStatus: lastStatus,
     catalogSearchUrl,
     queryUsed: lastQuery,
+  };
+}
+
+async function queryJinaMarkdownFallback(term: string, maxItems = 12): Promise<{
+  candidates: CengkarengCandidate[];
+  status: number;
+}> {
+  const targetUrl = buildCatalogSearchUrl(term);
+  const jinaUrl = `https://r.jina.ai/${targetUrl}`;
+  try {
+    const res = await fetch(jinaUrl, {
+      method: 'GET',
+      headers: {
+        Accept: 'text/plain',
+        'X-Return-Format': 'markdown',
+      },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+
+    if (!res.ok) {
+      return { candidates: [], status: res.status };
+    }
+
+    const markdown = await res.text();
+    const candidates: CengkarengCandidate[] = [];
+    const seenUrls = new Set<string>();
+    const linkRegex = /\[([^\]]{4,160})\]\((https?:\/\/(?:www\.)?hondacengkareng\.com\/(?:produk|product)\/[^)\s#?]+)\)/gi;
+    let match: RegExpExecArray | null;
+
+    while ((match = linkRegex.exec(markdown)) !== null && candidates.length < maxItems) {
+      const rawTitle = match[1].replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim();
+      const prodUrl = match[2].trim();
+      if (!rawTitle || seenUrls.has(prodUrl)) continue;
+      seenUrls.add(prodUrl);
+
+      const windowSlice = markdown.slice(Math.max(0, match.index - 220), match.index + 320);
+      const imgMatch = windowSlice.match(/!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/i)?.[1] ?? null;
+      const priceMatch = windowSlice.match(/Rp\.?\s*([0-9]{1,3}(?:[.,][0-9]{3})+|[0-9]{4,8})/i);
+      const priceIdr = priceMatch?.[1] ? parsePriceAmount(priceMatch[1], 0) : null;
+
+      candidates.push({
+        title: decodeHtmlEntities(rawTitle),
+        partCodes: extractHondaPartCodes(`${rawTitle} ${prodUrl}`),
+        url: prodUrl,
+        photoUrl: isHttpUrl(imgMatch) ? imgMatch.trim() : null,
+        priceIdr,
+      });
+    }
+
+    return { candidates, status: res.status };
+  } catch {
+    return { candidates: [], status: 0 };
+  }
+}
+
+export async function searchCengkarengCatalogTerm(
+  term: string,
+  perPage = 12
+): Promise<{
+  candidates: CengkarengCandidate[];
+  tierUsed: 'wc-store-v1' | 'wc-store-legacy' | 'html-jsonld' | 'jina-markdown' | 'none';
+  httpStatus: number;
+}> {
+  const cleanTerm = term.trim();
+  if (!cleanTerm) {
+    return { candidates: [], tierUsed: 'none', httpStatus: 0 };
+  }
+
+  // Tier 1: WooCommerce Store API (v1 -> legacy)
+  const storeRes = await queryWcStoreApi('search', cleanTerm, perPage);
+  if (storeRes.candidates.length > 0 && storeRes.tier) {
+    return {
+      candidates: storeRes.candidates.slice(0, perPage),
+      tierUsed: storeRes.tier,
+      httpStatus: storeRes.status,
+    };
+  }
+
+  // Tier 2: Direct HTML search + JSON-LD / WooCommerce card parser
+  const htmlRes = await queryHtmlSearchFallback(cleanTerm, perPage);
+  if (htmlRes.candidates.length > 0) {
+    return {
+      candidates: htmlRes.candidates.slice(0, perPage),
+      tierUsed: 'html-jsonld',
+      httpStatus: htmlRes.status,
+    };
+  }
+
+  // Tier 3: Jina Reader markdown fallback
+  const jinaRes = await queryJinaMarkdownFallback(cleanTerm, perPage);
+  if (jinaRes.candidates.length > 0) {
+    return {
+      candidates: jinaRes.candidates.slice(0, perPage),
+      tierUsed: 'jina-markdown',
+      httpStatus: jinaRes.status,
+    };
+  }
+
+  return {
+    candidates: [],
+    tierUsed: 'none',
+    httpStatus: jinaRes.status || htmlRes.status || storeRes.status,
   };
 }

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { useAnimatedPresence } from '../hooks/useAnimatedPresence';
 import { SurfaceWatermark } from './WatermarkOverlay';
+import papLogo from '../assets/PAP1_nobackground.webp';
 
 export type AiNoticeState =
   | {
@@ -108,11 +109,11 @@ export function AiNoticeModal({
           <div className="flex items-start justify-between gap-2">
             <div className="flex h-10 w-[140px] items-center justify-start overflow-hidden">
               <img
-                src="/PAP1.webp"
+                src={papLogo}
                 alt="PaP Asist"
                 width={2000}
                 height={2000}
-                className="h-[160px] w-[160px] max-w-none select-none object-contain mix-blend-multiply"
+                className="h-[160px] w-[160px] max-w-none select-none object-contain"
               />
             </div>
 

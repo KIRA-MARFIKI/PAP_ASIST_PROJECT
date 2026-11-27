@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import gsap from 'gsap';
 
 interface SearchLoadingStateProps {
-  mode: 'text' | 'image';
+  mode: 'text' | 'image' | 'category';
 }
 
 export function SearchLoadingState({ mode }: SearchLoadingStateProps) {
@@ -61,12 +61,16 @@ export function SearchLoadingState({ mode }: SearchLoadingStateProps) {
 
         <div className="min-w-0 flex-1">
           <p className="text-sm font-bold text-[#18181B]">
-            AI sedang mencari nama resmi part...
+            {mode === 'category'
+              ? 'Memuat suku cadang kategori...'
+              : 'AI sedang mencari nama resmi part...'}
           </p>
           <p className="mt-0.5 text-xs text-[#52525B]">
-            {mode === 'image'
-              ? 'Mengenali foto part lalu mencocokkan data gudang Padang Panjang dan katalog Honda Cengkareng'
-              : 'Mengecek data gudang Padang Panjang dan katalog Honda Cengkareng'}
+            {mode === 'category'
+              ? 'Mengambil data kategori dari katalog Honda Cengkareng dan gudang Padang Panjang...'
+              : mode === 'image'
+                ? 'Mengenali foto part lalu mencocokkan data gudang Padang Panjang dan katalog Honda Cengkareng'
+                : 'Mengecek data gudang Padang Panjang dan katalog Honda Cengkareng'}
           </p>
         </div>
       </div>

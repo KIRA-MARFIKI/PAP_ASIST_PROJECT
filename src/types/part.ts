@@ -29,6 +29,17 @@ export interface PartItem {
   aliases: string[];
 }
 
+export type CategoryId = 'busi' | 'kampas_rem' | 'oli';
+
+export type CategorySubType = 'depan' | 'belakang' | 'oli_mesin' | 'oli_gardan' | null;
+
+export interface CategoryThumbnailInfo {
+  photoUrl: string | null;
+  count: number;
+}
+
+export type CategoryThumbnailsMap = Partial<Record<CategoryId, CategoryThumbnailInfo>>;
+
 export interface SearchResultItem {
   id: string;
   foto: string;
@@ -45,6 +56,7 @@ export interface SearchResultItem {
   stockStatus: WarehouseStockStatus;
   statusLabel?: string | null;
   sourceUrl?: string | null;
+  subType?: CategorySubType;
 }
 
 export interface SearchPartResponse {

@@ -21,8 +21,18 @@ import { WatermarkOverlay } from './components/WatermarkOverlay';
 import { SearchLoadingState } from './components/SearchLoadingState';
 import { ErrorFallbackPage } from './components/ErrorFallbackPage';
 import { AiNoticeModal, AiNoticeState } from './components/AiNoticeModal';
+import { CategoryCard } from './components/CategoryCard';
+import { HomeRedGradientBackdrop } from './components/HomeRedGradientBackdrop';
+import { PromoBanner } from './components/PromoBanner';
+import papLogo from './assets/PAP1_nobackground.webp';
 import { isSupabaseConfigured, supabase } from './lib/supabase';
 import { applyWatermarkToImageFile } from './utils/watermark';
+import {
+  CATEGORY_ITEMS,
+  fetchCategoryParts,
+  fetchCategoryThumbnails,
+  getCategoryLabel,
+} from './services/categoryPartsService';
 import {
   fetchAllParts,
   getLowStockParts,
@@ -39,6 +49,8 @@ import {
   searchPartWithText,
 } from './services/geminiPartAgent';
 import {
+  CategoryId,
+  CategoryThumbnailsMap,
   PartItem,
   SearchResultItem,
   SearchStatus,
@@ -98,11 +110,16 @@ export function App() {
   const [query, setQuery] = useState('');
   const [hasSearched, setHasSearched] = useState(false);
   const [status, setStatus] = useState<SearchStatus>('idle');
-  const [loadingMode, setLoadingMode] = useState<'text' | 'image'>('text');
+  const [loadingMode, setLoadingMode] = useState<'text' | 'image' | 'category'>('text');
   const [officialQueryName, setOfficialQueryName] = useState('');
   const [results, setResults] = useState<SearchResultItem[]>([]);
   const [searchNote, setSearchNote] = useState('');
   const [aiNotice, setAiNotice] = useState<AiNoticeState | null>(null);
+
+  const [activeCategory, setActiveCategory] = useState<CategoryId | null>(null);
+  const [categorySubFilter, setCategorySubFilter] = useState<string>('all');
+  const [categoryError, setCategoryError] = useState<string>('');
+  const [categoryThumbnails, setCategoryThumbnails] = useState<CategoryThumbnailsMap>({});
 
   const [selectedImageFile, setSelectedImageFile] = useState<File | null>(null);
   const [selectedImagePreview, setSelectedImagePreview] = useState<string | null>(null);
@@ -149,6 +166,10 @@ export function App() {
       if (!active) return;
       setParts(res.parts);
       setPartsLoadError(res.error || '');
+    });
+    void fetchCategoryThumbnails().then((thumbs) => {
+      if (!active) return;
+      setCategoryThumbnails(thumbs);
     });
     return () => {
       active = false;
@@ -243,16 +264,52 @@ export function App() {
     };
   }, [adminSession]);
 
+  const categorySubFilterOptions = useMemo(() => {
+    if (!activeCategory || status !== 'success' || results.length === 0) {
+      return [];
+    }
+    if (activeCategory === 'kampas_rem') {
+      const hasFront = results.some((r) => r.subType === 'depan');
+      const hasRear = results.some((r) => r.subType === 'belakang');
+      if (hasFront && hasRear) {
+        return [
+          { id: 'all', label: 'Semua' },
+          { id: 'depan', label: 'Depan' },
+          { id: 'belakang', label: 'Belakang' },
+        ];
+      }
+    }
+    if (activeCategory === 'oli') {
+      const hasEngine = results.some((r) => r.subType === 'oli_mesin');
+      const hasGear = results.some((r) => r.subType === 'oli_gardan');
+      if (hasEngine && hasGear) {
+        return [
+          { id: 'all', label: 'Semua' },
+          { id: 'oli_mesin', label: 'Oli Mesin' },
+          { id: 'oli_gardan', label: 'Oli Gardan' },
+        ];
+      }
+    }
+    return [];
+  }, [activeCategory, status, results]);
+
+  const displayedResults = useMemo(() => {
+    if (!activeCategory || categorySubFilter === 'all') {
+      return results;
+    }
+    return results.filter((item) => item.subType === categorySubFilter);
+  }, [activeCategory, categorySubFilter, results]);
+
   useEffect(() => {
-    if (isNotFoundRoute) return;
+    if (isNotFoundRoute || hasSearched) return;
     const ctx = gsap.context(() => {
       const mm = gsap.matchMedia();
       mm.add('(prefers-reduced-motion: no-preference)', () => {
         gsap.from('.hero-stagger', {
           opacity: 0,
-          y: 16,
-          duration: 0.45,
-          stagger: 0.08,
+          y: 14,
+          duration: 0.38,
+          stagger: 0.06,
           ease: 'power2.out',
           clearProps: 'transform,opacity',
         });
@@ -263,7 +320,7 @@ export function App() {
     }, pageRef);
 
     return () => ctx.revert();
-  }, [isNotFoundRoute]);
+  }, [isNotFoundRoute, hasSearched]);
 
   useLayoutEffect(() => {
     const state = flipStateRef.current;
@@ -289,7 +346,7 @@ export function App() {
   }, [hasSearched]);
 
   useEffect(() => {
-    if (status !== 'success' || results.length === 0) return;
+    if (status !== 'success' || displayedResults.length === 0) return;
 
     const container = resultsContainerRef.current;
     if (!container) return;
@@ -300,8 +357,8 @@ export function App() {
         gsap.from('.result-card', {
           opacity: 0,
           y: 14,
-          duration: 0.3,
-          stagger: 0.07,
+          duration: 0.28,
+          stagger: 0.05,
           ease: 'power2.out',
           clearProps: 'transform,opacity',
         });
@@ -312,7 +369,7 @@ export function App() {
     }, container);
 
     return () => ctx.revert();
-  }, [status, results]);
+  }, [status, displayedResults]);
 
   // Bebaskan object URL preview setiap kali gambar diganti atau komponen unmount untuk mencegah memory leak.
   useEffect(() => {
@@ -368,6 +425,9 @@ export function App() {
       searchRequestIdRef.current = requestId;
 
       lastSearchPayloadRef.current = { query: activeQuery, image: activeImage };
+      setActiveCategory(null);
+      setCategorySubFilter('all');
+      setCategoryError('');
       setIsHistoryOpen(false);
       setIsNotifOpen(false);
       setAiNotice(null);
@@ -490,6 +550,9 @@ export function App() {
 
   const handleSelectNotifPart = (part: PartItem) => {
     searchRequestIdRef.current += 1;
+    setActiveCategory(null);
+    setCategorySubFilter('all');
+    setCategoryError('');
     setIsNotifOpen(false);
     setIsHistoryOpen(false);
     setAiNotice(null);
@@ -502,10 +565,70 @@ export function App() {
     setStatus('success');
   };
 
+  const executeCategoryLookup = useCallback(
+    async (category: CategoryId) => {
+      const requestId = searchRequestIdRef.current + 1;
+      searchRequestIdRef.current = requestId;
+
+      handleClearImage();
+      setQuery('');
+      setActiveCategory(category);
+      setCategorySubFilter('all');
+      setCategoryError('');
+      setIsHistoryOpen(false);
+      setIsNotifOpen(false);
+      setAiNotice(null);
+      triggerDockTransition();
+
+      setLoadingMode('category');
+      setStatus('loading');
+      setOfficialQueryName(getCategoryLabel(category));
+      setSearchNote('');
+      setResults([]);
+
+      try {
+        const res = await fetchCategoryParts(category);
+        if (requestId !== searchRequestIdRef.current) {
+          return;
+        }
+        setOfficialQueryName(res.categoryLabel);
+        if (res.results.length === 0) {
+          setResults([]);
+          setStatus('empty');
+        } else {
+          setResults(res.results);
+          setStatus('success');
+          const firstPhoto = res.results.find((item) => item.foto.startsWith('http'))?.foto ?? null;
+          setCategoryThumbnails((prev) => ({
+            ...prev,
+            [category]: {
+              photoUrl: firstPhoto || prev[category]?.photoUrl || null,
+              count: res.results.length,
+            },
+          }));
+        }
+      } catch (err) {
+        if (requestId !== searchRequestIdRef.current) {
+          return;
+        }
+        setStatus('error');
+        setCategoryError(
+          err instanceof Error
+            ? err.message
+            : 'Gagal memuat suku cadang kategori dari katalog Honda Cengkareng.'
+        );
+      }
+    },
+    [handleClearImage, triggerDockTransition]
+  );
+
   const handleResetHome = () => {
     if (!hasSearched) return;
     searchRequestIdRef.current += 1;
     setHasSearched(false);
+    setActiveCategory(null);
+    setCategorySubFilter('all');
+    setCategoryError('');
     setStatus('idle');
     setResults([]);
     setOfficialQueryName('');
@@ -645,7 +768,7 @@ export function App() {
 
   return (
     <div ref={pageRef} className="relative flex min-h-screen flex-col bg-white text-[#18181B]">
-      <WatermarkOverlay />
+      {hasSearched ? <WatermarkOverlay /> : <HomeRedGradientBackdrop />}
 
       <header className="relative z-30 flex items-center justify-between px-4 pt-3.5 sm:px-6 sm:pt-4">
         <div className="min-w-0">
@@ -667,19 +790,23 @@ export function App() {
               />
               <span className="flex h-6 w-[84px] shrink-0 items-center justify-center overflow-hidden">
                 <img
-                  src="/PAP1.webp"
+                  src={papLogo}
                   alt="PaP Asist"
                   width={2000}
                   height={2000}
                   fetchPriority="high"
-                  className="h-[112px] w-[112px] max-w-none select-none object-contain mix-blend-multiply"
+                  className="h-[112px] w-[112px] max-w-none select-none object-contain"
                 />
               </span>
             </button>
           )}
         </div>
 
-        <div className="hero-stagger flex items-center gap-1 sm:gap-1.5">
+        <div
+          className={`hero-stagger flex items-center gap-1 sm:gap-1.5 ${
+            !hasSearched ? 'rounded-[10px] border border-[#E4E4E7] bg-white/95 p-0.5' : ''
+          }`}
+        >
           <button
             type="button"
             onClick={() => {
@@ -754,32 +881,35 @@ export function App() {
       </header>
 
       <main
-        className={`relative z-20 mx-auto flex w-full max-w-[680px] flex-1 flex-col px-4 ${hasSearched ? 'justify-start pt-4 sm:pt-5' : 'justify-center pb-16'
-          }`}
+        className={`relative z-20 mx-auto flex w-full flex-1 flex-col px-4 ${
+          hasSearched
+            ? 'max-w-[680px] justify-start pt-4 sm:pt-5'
+            : 'max-w-[780px] justify-start pt-5 pb-14 sm:pt-8 sm:pb-16'
+        }`}
       >
         <h1 className="sr-only">PaP Asist</h1>
 
         {!hasSearched && (
-          <div className="mb-7 flex flex-col items-center text-center">
+          <div className="mb-6 flex flex-col items-center text-center">
             <img
               src="/honda-7.webp"
               alt="Logo Honda"
               width={180}
               height={60}
               fetchPriority="high"
-              className="hero-stagger mb-2 h-10 sm:h-12 w-auto select-none object-contain"
+              className="hero-stagger mb-1.5 h-9 sm:h-11 w-auto select-none object-contain"
             />
-            <div className="hero-stagger flex h-16 sm:h-20 w-[210px] sm:w-[250px] items-center justify-center overflow-hidden">
+            <div className="hero-stagger flex h-14 sm:h-18 w-[200px] sm:w-[240px] items-center justify-center overflow-hidden">
               <img
-                src="/PAP1.webp"
+                src={papLogo}
                 alt="PaP Asist"
                 width={2000}
                 height={2000}
                 fetchPriority="high"
-                className="h-[260px] w-[260px] sm:h-[310px] sm:w-[310px] max-w-none select-none object-contain mix-blend-multiply"
+                className="h-[245px] w-[245px] sm:h-[290px] sm:w-[290px] max-w-none select-none object-contain"
               />
             </div>
-            <p className="hero-stagger mt-1 text-sm text-[#52525B]">
+            <p className="hero-stagger mt-0.5 text-xs sm:text-sm font-medium text-[#52525B]">
               Padang Panjang Part Asisten
             </p>
           </div>
@@ -788,7 +918,7 @@ export function App() {
         <div
           ref={searchDockRef}
           data-flip-id="pap-search-dock"
-          className={!hasSearched ? 'hero-stagger w-full' : 'w-full'}
+          className={!hasSearched ? 'hero-stagger mx-auto w-full max-w-[680px]' : 'w-full'}
         >
           <SearchBar
             query={query}
@@ -819,22 +949,102 @@ export function App() {
           />
         </div>
 
+        {!hasSearched && (
+          <>
+            <PromoBanner />
+
+            <section aria-labelledby="kategori-part-heading" className="mt-7 w-full">
+              <div className="hero-stagger mb-3 flex items-center justify-between gap-3">
+                <h2
+                  id="kategori-part-heading"
+                  className="text-base sm:text-lg font-bold text-[#18181B]"
+                >
+                  Kategori Part
+                </h2>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsNotifOpen(false);
+                    setIsLoginOpen(false);
+                    setIsTableOpen(true);
+                  }}
+                  className="inline-flex min-h-[44px] cursor-pointer items-center rounded-[8px] px-2.5 text-xs sm:text-sm font-semibold text-[#CC0000] transition-colors hover:bg-[#FEF2F2] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#CC0000]"
+                >
+                  Lihat Semua
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                {CATEGORY_ITEMS.map((cat) => (
+                  <CategoryCard
+                    key={cat.id}
+                    category={cat}
+                    thumbnailInfo={categoryThumbnails[cat.id]}
+                    onSelect={() => {
+                      void executeCategoryLookup(cat.id);
+                    }}
+                  />
+                ))}
+              </div>
+            </section>
+          </>
+        )}
+
         {hasSearched && (
           <section aria-live="polite" className="mt-4 pb-10">
             {status === 'loading' && <SearchLoadingState mode={loadingMode} />}
 
             {status !== 'loading' && officialQueryName && status !== 'error' && (
-              <p className="mb-4 text-xs sm:text-sm text-[#52525B]">
-                Dicari sebagai:{' '}
-                <span className="font-semibold text-[#18181B]">
-                  {officialQueryName}
-                </span>
-              </p>
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs sm:text-sm text-[#52525B]">
+                  {activeCategory ? 'Kategori: ' : 'Dicari sebagai: '}
+                  <span className="font-semibold text-[#18181B]">
+                    {officialQueryName}
+                  </span>
+                </p>
+
+                {activeCategory && (
+                  <button
+                    type="button"
+                    onClick={handleResetHome}
+                    className="inline-flex min-h-[44px] cursor-pointer items-center rounded-[8px] border border-[#E4E4E7] bg-white px-3 text-xs font-semibold text-[#18181B] transition-colors hover:bg-[#F4F4F5] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#CC0000]"
+                  >
+                    Kembali ke Beranda
+                  </button>
+                )}
+              </div>
+            )}
+
+            {categorySubFilterOptions.length > 0 && (
+              <div
+                role="group"
+                aria-label="Filter subkategori"
+                className="mb-4 flex flex-wrap items-center gap-2"
+              >
+                {categorySubFilterOptions.map((opt) => {
+                  const isSelected = categorySubFilter === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setCategorySubFilter(opt.id)}
+                      aria-pressed={isSelected}
+                      className={`min-h-[44px] cursor-pointer rounded-[8px] border px-3.5 text-xs sm:text-sm font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#CC0000] ${
+                        isSelected
+                          ? 'border-[#CC0000] bg-[#CC0000] text-white'
+                          : 'border-[#E4E4E7] bg-white text-[#3F3F46] hover:bg-[#F4F4F5]'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
             )}
 
             {status === 'success' && (
               <div ref={resultsContainerRef} className="space-y-3">
-                {results.map((part) => (
+                {displayedResults.map((part) => (
                   <ResultCard key={part.id} part={part} />
                 ))}
                 {searchNote && (
@@ -845,7 +1055,41 @@ export function App() {
 
             {status === 'empty' && (
               <div className="py-12 text-center text-sm text-[#52525B]">
-                Part tidak ditemukan. Coba nama lain atau foto part.
+                {activeCategory
+                  ? 'Belum ada suku cadang yang dapat ditampilkan untuk kategori ini.'
+                  : 'Part tidak ditemukan. Coba nama lain atau foto part.'}
+              </div>
+            )}
+
+            {status === 'error' && activeCategory && (
+              <div
+                role="alert"
+                className="rounded-[8px] border border-[#E4E4E7] bg-white p-5 text-center"
+              >
+                <p className="text-sm font-semibold text-[#18181B]">
+                  Gagal memuat kategori {getCategoryLabel(activeCategory)}
+                </p>
+                <p className="mt-1.5 text-xs sm:text-sm text-[#52525B]">
+                  {categoryError || 'Koneksi ke katalog Honda Cengkareng terganggu.'}
+                </p>
+                <div className="mt-4 flex flex-wrap items-center justify-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void executeCategoryLookup(activeCategory);
+                    }}
+                    className="min-h-[44px] cursor-pointer rounded-[8px] bg-[#CC0000] px-4 py-2 text-xs sm:text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#CC0000]"
+                  >
+                    Coba Lagi
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleResetHome}
+                    className="min-h-[44px] cursor-pointer rounded-[8px] border border-[#D4D4D8] bg-white px-4 py-2 text-xs sm:text-sm font-semibold text-[#18181B] transition-colors hover:bg-[#F4F4F5] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#CC0000]"
+                  >
+                    Kembali ke Beranda
+                  </button>
+                </div>
               </div>
             )}
           </section>

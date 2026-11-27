@@ -1,4 +1,5 @@
 import { WatermarkOverlay } from './WatermarkOverlay';
+import papLogo from '../assets/PAP1_nobackground.webp';
 
 interface ErrorFallbackPageProps {
   mode: '404' | 'runtime' | 'config';
@@ -40,12 +41,12 @@ export function ErrorFallbackPage({ mode, onGoHome }: ErrorFallbackPageProps) {
         />
         <div className="flex h-14 w-[200px] items-center justify-center overflow-hidden">
           <img
-            src="/PAP1.webp"
+            src={papLogo}
             alt="PaP Asist"
             width={2000}
             height={2000}
             fetchPriority="high"
-            className="h-[240px] w-[240px] max-w-none select-none object-contain mix-blend-multiply"
+            className="h-[240px] w-[240px] max-w-none select-none object-contain"
           />
         </div>
 

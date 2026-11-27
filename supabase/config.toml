@@ -8,3 +8,6 @@ verify_jwt = false
 
 [functions.enrich-parts]
 verify_jwt = false
+
+[functions.category-parts]
+verify_jwt = false
