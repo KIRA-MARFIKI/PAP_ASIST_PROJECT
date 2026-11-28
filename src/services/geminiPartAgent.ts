@@ -31,6 +31,9 @@ interface EdgeMergedResult {
   officialName: string;
   partCode: string;
   rackCode: string;
+  isDummyRack?: boolean;
+  rackZoneLabel?: string | null;
+  itemGroup?: 'sparepart' | 'aksesoris' | 'apparel';
   price: number | null;
   priceSource?: 'warehouse' | 'cengkareng' | 'none';
   stock: number | null;
@@ -115,6 +118,9 @@ function mapEdgeResponse(data: EdgeSearchResponse, fallbackQuery: string): Searc
         namaResmi: item.officialName,
         kodePart: item.partCode,
         kodeRak: item.rackCode || '-',
+        isDummyRack: Boolean(item.isDummyRack),
+        rackZoneLabel: item.rackZoneLabel ?? null,
+        itemGroup: item.itemGroup ?? 'sparepart',
         harga: item.price,
         priceSource:
           item.priceSource ??

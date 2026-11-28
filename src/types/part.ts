@@ -1,5 +1,7 @@
 export type PartCategory = 'fast' | 'slow';
 
+export type ItemGroup = 'sparepart' | 'aksesoris' | 'apparel';
+
 export type PriceSource = 'warehouse' | 'cengkareng' | 'none';
 
 export type StockStatus = 'available' | 'critical' | 'unavailable' | 'unknown';
@@ -17,6 +19,8 @@ export interface PartItem {
   namaResmi: string;
   kodePart: string;
   kodeRak: string;
+  itemGroup: ItemGroup;
+  isDummyRack: boolean;
   harga: number | null;
   priceSource: PriceSource;
   kategori: PartCategory;
@@ -46,6 +50,9 @@ export interface SearchResultItem {
   namaResmi: string;
   kodePart: string;
   kodeRak: string;
+  isDummyRack?: boolean;
+  rackZoneLabel?: string | null;
+  itemGroup?: ItemGroup;
   harga: number | null;
   priceSource: PriceSource;
   stok: number | null;
@@ -74,6 +81,8 @@ export interface SinglePartUpdatePayload {
   partCodeKey: string;
   namaResmi: string;
   kodeRak: string;
+  itemGroup: ItemGroup;
+  isDummyRack: boolean;
   harga: number | null;
   priceSource: PriceSource;
   kategori: PartCategory;
@@ -91,6 +100,8 @@ export interface ParsedWarehouseRow {
   kodePart: string;
   namaResmi: string;
   kodeRak: string;
+  itemGroup: ItemGroup;
+  isDummyRack: boolean;
   harga: number | null;
   priceSource: PriceSource;
   kategori: PartCategory;

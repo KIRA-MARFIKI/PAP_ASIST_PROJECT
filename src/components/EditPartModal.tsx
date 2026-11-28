@@ -1,7 +1,18 @@
-import { ChangeEvent, FormEvent, useEffect, useRef, useState } from 'react';
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Upload, X } from 'lucide-react';
 import { useAnimatedPresence } from '../hooks/useAnimatedPresence';
-import { PartCategory, PartItem, PriceSource, SinglePartUpdatePayload } from '../types/part';
+import {
+  ItemGroup,
+  PartCategory,
+  PartItem,
+  PriceSource,
+  SinglePartUpdatePayload,
+} from '../types/part';
+import {
+  ACCESSORY_APPAREL_RACKS,
+  RACK_BY_CODE,
+  resolveAccessoryApparelRack,
+} from '../utils/rackRules';
 import { SurfaceWatermark } from './WatermarkOverlay';
 
 interface EditPartModalProps {
@@ -18,6 +29,8 @@ interface EditErrors {
   form?: string;
 }
 
+const MANUAL_RACK_VALUE = '__MANUAL__';
+
 export function EditPartModal({ part, onClose, onSave }: EditPartModalProps) {
   const isOpen = Boolean(part);
   const lastPartRef = useRef<PartItem | null>(part);
@@ -32,7 +45,10 @@ export function EditPartModal({ part, onClose, onSave }: EditPartModalProps) {
   const shouldRender = useAnimatedPresence(isOpen, backdropRef, dialogRef);
 
   const [namaResmi, setNamaResmi] = useState('');
-  const [kodeRak, setKodeRak] = useState('-');
+  const [rackSelectValue, setRackSelectValue] = useState('-');
+  const [manualRackText, setManualRackText] = useState('');
+  const [itemGroup, setItemGroup] = useState<ItemGroup>('sparepart');
+  const [rackHintMessage, setRackHintMessage] = useState('');
   const [hargaText, setHargaText] = useState('');
   const [kategori, setKategori] = useState<PartCategory>('fast');
   const [stockUnknown, setStockUnknown] = useState(false);
@@ -44,10 +60,26 @@ export function EditPartModal({ part, onClose, onSave }: EditPartModalProps) {
   const [errors, setErrors] = useState<EditErrors>({});
   const [isSaving, setIsSaving] = useState(false);
 
+  const rackGroups = useMemo(() => {
+    return {
+      wallDisplay: ACCESSORY_APPAREL_RACKS.filter((r) => r.zone === 'wall_display'),
+      etalase: ACCESSORY_APPAREL_RACKS.filter((r) => r.zone === 'etalase'),
+      aquarium: ACCESSORY_APPAREL_RACKS.filter((r) => r.zone === 'aquarium'),
+      ruangB1: ACCESSORY_APPAREL_RACKS.filter((r) => r.aisle === 'B-01'),
+      ruangB2: ACCESSORY_APPAREL_RACKS.filter((r) => r.aisle === 'B-02'),
+    };
+  }, []);
+
   useEffect(() => {
     if (!part) return;
+    const rawRack = (part.kodeRak || '-').trim();
+    const isStandardizedRack = rawRack === '-' || RACK_BY_CODE.has(rawRack);
+
     setNamaResmi(part.namaResmi);
-    setKodeRak(part.kodeRak || '-');
+    setRackSelectValue(isStandardizedRack ? rawRack : MANUAL_RACK_VALUE);
+    setManualRackText(isStandardizedRack ? '' : rawRack);
+    setItemGroup(part.itemGroup || 'sparepart');
+    setRackHintMessage('');
     setHargaText(part.harga !== null ? String(part.harga) : '');
     setKategori(part.kategori);
     setStockUnknown(!part.stockKnown);
@@ -93,13 +125,34 @@ export function EditPartModal({ part, onClose, onSave }: EditPartModalProps) {
     e.target.value = '';
   };
 
+  const handleSuggestAutoRack = () => {
+    if (!activePart) return;
+    const resolution = resolveAccessoryApparelRack({
+      partCode: activePart.kodePart,
+      officialName: namaResmi || activePart.namaResmi,
+    });
+    if (resolution.suggestedRackCode) {
+      setRackSelectValue(resolution.suggestedRackCode);
+      setManualRackText('');
+      setItemGroup(resolution.itemGroup);
+      setRackHintMessage(`${resolution.suggestedRackCode} (${resolution.matchedRule})`);
+    } else {
+      setItemGroup('sparepart');
+      setRackHintMessage(
+        'Item ini termasuk sparepart standar. Pilih "Kode Rak Lainnya (Manual)" untuk mengisi rak sparepart.'
+      );
+    }
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (!activePart || isSaving) return;
 
     const nextErrors: EditErrors = {};
     const cleanName = namaResmi.trim().toUpperCase();
-    const cleanRack = kodeRak.trim().toUpperCase() || '-';
+    const rawChosenRack =
+      rackSelectValue === MANUAL_RACK_VALUE ? manualRackText.trim().toUpperCase() : rackSelectValue;
+    const cleanRack = rawChosenRack || '-';
     const trimmedPrice = hargaText.trim();
 
     if (!cleanName) {
@@ -172,6 +225,8 @@ export function EditPartModal({ part, onClose, onSave }: EditPartModalProps) {
         partCodeKey: activePart.id,
         namaResmi: cleanName,
         kodeRak: cleanRack,
+        itemGroup,
+        isDummyRack: false,
         harga: parsedHarga,
         priceSource: nextPriceSource,
         kategori,
@@ -268,47 +323,152 @@ export function EditPartModal({ part, onClose, onSave }: EditPartModalProps) {
               )}
             </div>
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div>
+            <div>
+              <span className="mb-1.5 block text-xs font-semibold text-[#18181B]">
+                Kelompok Item
+              </span>
+              <div className="grid grid-cols-3 gap-2">
+                {(
+                  [
+                    { id: 'sparepart', label: 'Sparepart' },
+                    { id: 'aksesoris', label: 'Aksesoris' },
+                    { id: 'apparel', label: 'Apparel' },
+                  ] as const
+                ).map((grp) => (
+                  <button
+                    key={grp.id}
+                    type="button"
+                    onClick={() => setItemGroup(grp.id)}
+                    aria-pressed={itemGroup === grp.id}
+                    className={`min-h-[44px] cursor-pointer rounded-[8px] border px-2.5 text-xs sm:text-sm font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#CC0000] ${
+                      itemGroup === grp.id
+                        ? 'border-[#CC0000] bg-[#CC0000] text-white'
+                        : 'border-[#D4D4D8] bg-white text-[#18181B] hover:bg-[#F4F4F5]'
+                    }`}
+                  >
+                    {grp.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-2.5 rounded-[8px] border border-[#E4E4E7] bg-[#FAFAFA] p-3.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <label
-                  htmlFor="edit-part-rack"
-                  className="mb-1 block text-xs font-semibold text-[#18181B]"
+                  htmlFor="edit-part-rack-select"
+                  className="block text-xs font-semibold text-[#18181B]"
                 >
-                  Kode Rak
+                  Kode Rak Gudang
                 </label>
-                <input
-                  id="edit-part-rack"
-                  type="text"
-                  value={kodeRak}
-                  onChange={(e) => setKodeRak(e.target.value)}
-                  placeholder="Contoh: A-12"
-                  className="tabular-nums min-h-[44px] w-full rounded-[8px] border border-[#D4D4D8] bg-white/95 px-3.5 py-2 text-sm text-[#18181B] placeholder:text-[#71717A] focus-visible:border-[#CC0000] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#CC0000]"
-                />
+                <button
+                  type="button"
+                  onClick={handleSuggestAutoRack}
+                  className="inline-flex min-h-[36px] cursor-pointer items-center rounded-[6px] border border-[#CC0000]/35 bg-white px-2.5 py-1 text-xs font-semibold text-[#CC0000] transition-colors hover:bg-[#FEF2F2] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#CC0000]"
+                >
+                  Saran Rak Otomatis
+                </button>
               </div>
 
-              <div>
-                <label
-                  htmlFor="edit-part-price"
-                  className="mb-1 block text-xs font-semibold text-[#18181B]"
-                >
-                  Harga Padang Panjang (Rp)
-                </label>
-                <input
-                  id="edit-part-price"
-                  type="text"
-                  inputMode="numeric"
-                  value={hargaText}
-                  onChange={(e) => {
-                    setHargaText(e.target.value.replace(/\D/g, ''));
-                    if (errors.harga) setErrors((prev) => ({ ...prev, harga: undefined }));
-                  }}
-                  placeholder="Kosongkan jika belum ada"
-                  className="tabular-nums min-h-[44px] w-full rounded-[8px] border border-[#D4D4D8] bg-white/95 px-3.5 py-2 text-sm text-[#18181B] placeholder:text-[#71717A] focus-visible:border-[#CC0000] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#CC0000]"
-                />
-                {errors.harga && (
-                  <p className="mt-1 text-xs font-medium text-[#CC0000]">{errors.harga}</p>
-                )}
-              </div>
+              <select
+                id="edit-part-rack-select"
+                value={rackSelectValue}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setRackSelectValue(val);
+                  setRackHintMessage('');
+                  if (val !== MANUAL_RACK_VALUE) {
+                    setManualRackText('');
+                  }
+                }}
+                className="tabular-nums min-h-[44px] w-full cursor-pointer rounded-[8px] border border-[#D4D4D8] bg-white px-3 text-sm text-[#18181B] focus-visible:border-[#CC0000] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#CC0000]"
+              >
+                <option value="-">Belum diatur (-)</option>
+                <optgroup label="Wall Display">
+                  {rackGroups.wallDisplay.map((r) => (
+                    <option key={r.rackCode} value={r.rackCode}>
+                      {r.rackCode}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Etalase Pajangan">
+                  {rackGroups.etalase.map((r) => (
+                    <option key={r.rackCode} value={r.rackCode}>
+                      {r.rackCode}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Aquarium Part">
+                  {rackGroups.aquarium.map((r) => (
+                    <option key={r.rackCode} value={r.rackCode}>
+                      {r.rackCode}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Ruang B (Baris B-01)">
+                  {rackGroups.ruangB1.map((r) => (
+                    <option key={r.rackCode} value={r.rackCode}>
+                      {r.rackCode}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Ruang B (Baris B-02)">
+                  {rackGroups.ruangB2.map((r) => (
+                    <option key={r.rackCode} value={r.rackCode}>
+                      {r.rackCode}
+                    </option>
+                  ))}
+                </optgroup>
+                <option value={MANUAL_RACK_VALUE}>Kode Rak Lainnya (Manual)</option>
+              </select>
+
+              {rackSelectValue === MANUAL_RACK_VALUE && (
+                <div>
+                  <label
+                    htmlFor="edit-part-rack-manual"
+                    className="mb-1 block text-xs font-medium text-[#52525B]"
+                  >
+                    Masukkan Kode Rak Manual
+                  </label>
+                  <input
+                    id="edit-part-rack-manual"
+                    type="text"
+                    value={manualRackText}
+                    onChange={(e) => {
+                      setManualRackText(e.target.value);
+                    }}
+                    placeholder="Contoh: A-12-03"
+                    className="tabular-nums min-h-[44px] w-full rounded-[8px] border border-[#D4D4D8] bg-white px-3.5 py-2 text-sm text-[#18181B] placeholder:text-[#71717A] focus-visible:border-[#CC0000] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#CC0000]"
+                  />
+                </div>
+              )}
+
+              {rackHintMessage && (
+                <p className="text-xs font-medium text-[#3F3F46]">{rackHintMessage}</p>
+              )}
+            </div>
+
+            <div>
+              <label
+                htmlFor="edit-part-price"
+                className="mb-1 block text-xs font-semibold text-[#18181B]"
+              >
+                Harga Padang Panjang (Rp)
+              </label>
+              <input
+                id="edit-part-price"
+                type="text"
+                inputMode="numeric"
+                value={hargaText}
+                onChange={(e) => {
+                  setHargaText(e.target.value.replace(/\D/g, ''));
+                  if (errors.harga) setErrors((prev) => ({ ...prev, harga: undefined }));
+                }}
+                placeholder="Kosongkan jika belum ada"
+                className="tabular-nums min-h-[44px] w-full rounded-[8px] border border-[#D4D4D8] bg-white/95 px-3.5 py-2 text-sm text-[#18181B] placeholder:text-[#71717A] focus-visible:border-[#CC0000] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#CC0000]"
+              />
+              {errors.harga && (
+                <p className="mt-1 text-xs font-medium text-[#CC0000]">{errors.harga}</p>
+              )}
             </div>
 
             <div>

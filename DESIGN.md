@@ -40,6 +40,7 @@
 - `FileClock`: tombol pembuka panel Riwayat Upload di header Admin Asist.
 - `CloudDownload`: tombol sinkronisasi batch harga referensi Honda Cengkareng dan alias AI (10 part/batch) di header Admin Asist.
 - `KeyRound`: tombol pembuka modal ubah kredensial admin (email, password, PIN 12 digit) di header Admin Asist.
+- `LayoutGrid`: tombol pembuka modal Peta Rak Aksesoris & Apparel (22 kode rak standar lintas 4 zona) di header Admin Asist.
 - `Pencil`: tombol aksi edit cepat satu baris part di tabel Admin Asist.
 - `Download`: tombol unduh template CSV gudang pada modal Upload Data Baru.
 - `History`: ikon item riwayat pencarian di dropdown riwayat.

@@ -9,6 +9,7 @@ import {
   normalizePartCode,
   SideHint,
 } from '../_shared/cengkarengCatalog.ts';
+import { ItemGroup, resolveAccessoryApparelRack } from '../_shared/rackRules.ts';
 
 const CACHE_TTL_DAYS = 30;
 const MAX_AI_CALLS_PER_MIN_PER_IP = 15;
@@ -50,6 +51,8 @@ interface WarehouseRow {
   part_code_display: string;
   official_name: string;
   rack_code: string;
+  item_group?: ItemGroup | null;
+  is_dummy_rack?: boolean | null;
   price: number | null;
   price_source: 'warehouse' | 'cengkareng' | 'none';
   category: 'fast' | 'slow';
@@ -70,6 +73,9 @@ interface MergedPartResult {
   officialName: string;
   partCode: string;
   rackCode: string;
+  isDummyRack: boolean;
+  rackZoneLabel: string | null;
+  itemGroup: ItemGroup;
   price: number | null;
   priceSource: 'warehouse' | 'cengkareng' | 'none';
   category: 'fast' | 'slow' | null;
@@ -235,10 +241,13 @@ function parseGeminiJson(rawText: string): GeminiClassificationOutput | null {
   }
 }
 
-const SYSTEM_PROMPT = `Anda adalah spesialis suku cadang resmi motor Honda Indonesia (AHM / Honda Genuine Parts) untuk gudang Honda Menara Agung Padang Panjang.
+const SYSTEM_PROMPT = `Anda adalah spesialis suku cadang resmi motor Honda Indonesia (AHM / Honda Genuine Parts, Honda Genuine Accessories / HGA, dan Honda Genuine Apparel) untuk gudang Honda Menara Agung Padang Panjang.
 
 ATURAN CAKUPAN KETAT:
-- HANYA TERIMA permintaan terkait suku cadang motor Honda, aksesori resmi motor Honda, dan bahan habis pakai motor Honda (oli, minyak rem, chain lube, coolant, grease, busi, ban, baut, cover/body, mesin, CVT, kelistrikan, rangka, kaki-kaki).
+- HANYA TERIMA ("is_honda_motorcycle_part": true) permintaan terkait:
+  1. Suku cadang motor Honda dan bahan habis pakai motor Honda (oli, minyak rem, chain lube, coolant, grease, busi, ban, baut, cover/body, mesin, CVT, kelistrikan, rangka, kaki-kaki).
+  2. Honda Genuine Accessories (HGA) & paket bundling aksesoris motor Honda (awalan kode 0800A..., garnish, visor, windshield, panel step floor, karpet pijakan, seat cover, rear carrier, top box, crash bar, hand guard, tank pad).
+  3. Honda Genuine Apparel resmi motor Honda (jaket, baju, kaos, t-shirt, polo, jersey, hoodie, helm Honda / TRX, sarung tangan / glove, topi / cap, pouch / poct, waistbag, dompet, gelang, patch / stiker baju, pin, lanyard, gantungan kunci Honda).
 - Tetap TERIMA istilah bengkel bahasa sehari-hari Indonesia atau daerah untuk part motor Honda, seperti:
   - "batang padi" -> "PIPE COMP FR FORK"
   - "karet tutup deksel" -> "GASKET COMP., CYLINDER HEAD COVER (OH)"
@@ -246,6 +255,7 @@ ATURAN CAKUPAN KETAT:
   - "bosh arm" -> "BUSH, ENGINE HANGER"
   - "mika lampu" -> "LENS COMP"
   - "body vario 125 bagian kanan" -> "COVER R BODY" (model_hint: "Vario 125", side_hint: "right")
+  - "poct honda" / "pouch honda" -> "HONDA POUCH APPAREL"
 - TOLAK (set "is_honda_motorcycle_part": false) untuk:
   - Topik non-otomotif (resep makanan, coding, obrolan umum, cuaca, berita, matematika, pertanyaan pribadi, foto manusia/hewan/benda acak).
   - Suku cadang mobil (Avanza, Brio, Jazz, Innova, Xpander, dll).
@@ -440,16 +450,27 @@ function mapCatalogCandidatesToResults(
   candidateCodes: string[],
   officialName: string,
   fallbackPhotoUrl: string | null,
-  fallbackSourceUrl: string | null
+  fallbackSourceUrl: string | null,
+  rawQuery = ''
 ): MergedPartResult[] {
   return candidates.slice(0, 4).map((item, idx) => {
     const displayCode = item.partCodes[0] || candidateCodes[idx] || '-';
+    const resolvedName = item.title ? item.title.toUpperCase() : officialName;
+    const rackInfo = resolveAccessoryApparelRack({
+      partCode: displayCode,
+      officialName: resolvedName,
+      userQuery: rawQuery,
+    });
+
     return {
       id: `catalog-${normalizePartCode(displayCode) || 'item'}-${idx}`,
       photoUrl: item.photoUrl || fallbackPhotoUrl,
-      officialName: item.title ? item.title.toUpperCase() : officialName,
+      officialName: resolvedName,
       partCode: displayCode,
-      rackCode: '-',
+      rackCode: rackInfo.suggestedRackCode || '-',
+      isDummyRack: rackInfo.isDummyRack,
+      rackZoneLabel: rackInfo.zoneLabel,
+      itemGroup: rackInfo.itemGroup,
       price: item.priceIdr,
       priceSource: item.priceIdr !== null ? 'cengkareng' : 'none',
       category: null,
@@ -506,7 +527,8 @@ function hasDistinctiveTokenOverlap(targetOfficialName: string, candidateOfficia
 function mapWarehouseRowsToResults(
   rows: WarehouseRow[],
   fallbackPhotoUrl: string | null,
-  fallbackSourceUrl: string | null
+  fallbackSourceUrl: string | null,
+  rawQuery = ''
 ): MergedPartResult[] {
   return rows.map((row) => {
     const numericPrice = row.price === null || row.price === undefined ? null : Number(row.price);
@@ -517,13 +539,36 @@ function mapWarehouseRowsToResults(
           ? 'warehouse'
           : 'none';
     const stockKnown = Boolean(row.stock_known);
+    const hasConfirmedRack = Boolean(row.rack_code && row.rack_code !== '-' && !row.is_dummy_rack);
+    const rackInfo = resolveAccessoryApparelRack({
+      partCode: row.part_code_display || row.part_code,
+      officialName: row.official_name,
+      userQuery: rawQuery,
+    });
+    const finalRackCode = hasConfirmedRack
+      ? row.rack_code
+      : row.rack_code && row.rack_code !== '-'
+        ? row.rack_code
+        : rackInfo.suggestedRackCode || '-';
+    const finalIsDummyRack = hasConfirmedRack
+      ? false
+      : row.rack_code && row.rack_code !== '-'
+        ? Boolean(row.is_dummy_rack)
+        : rackInfo.isDummyRack;
+    const finalItemGroup: ItemGroup =
+      row.item_group === 'aksesoris' || row.item_group === 'apparel'
+        ? row.item_group
+        : rackInfo.itemGroup;
 
     return {
       id: row.part_code,
       photoUrl: row.photo_url || fallbackPhotoUrl || null,
       officialName: row.official_name,
       partCode: row.part_code_display,
-      rackCode: row.rack_code || '-',
+      rackCode: finalRackCode,
+      isDummyRack: finalIsDummyRack,
+      rackZoneLabel: rackInfo.zoneLabel,
+      itemGroup: finalItemGroup,
       price: numericPrice,
       priceSource,
       category: row.category,
@@ -677,7 +722,7 @@ Deno.serve(async (req: Request) => {
           sourceUrl: enrichedDirect[0].catalog_url || null,
           visualNotes: null,
           citations: [],
-          results: mapWarehouseRowsToResults(enrichedDirect, null, null),
+          results: mapWarehouseRowsToResults(enrichedDirect, null, null, rawQuery),
         });
       }
     }
@@ -870,7 +915,8 @@ Deno.serve(async (req: Request) => {
       mergedResults = mapWarehouseRowsToResults(
         enrichedMatches,
         catalogPhotoUrl,
-        sourceUrl || catalogSearchUrl
+        sourceUrl || catalogSearchUrl,
+        rawQuery
       );
     } else if (catalogCandidates.length > 0) {
       mergedResults = mapCatalogCandidatesToResults(
@@ -878,7 +924,8 @@ Deno.serve(async (req: Request) => {
         candidateCodes,
         officialName,
         catalogPhotoUrl,
-        sourceUrl || catalogSearchUrl
+        sourceUrl || catalogSearchUrl,
+        rawQuery
       );
     } else if (officialName) {
       // Pada cache hit yang belum punya data produk langsung, panggil katalog Honda Cengkareng (0 kuota Gemini)
@@ -940,14 +987,15 @@ Deno.serve(async (req: Request) => {
               supabase,
               freshWarehouseRows
             );
-            mergedResults = mapWarehouseRowsToResults(enrichedFresh, freshPhoto, freshUrl);
+            mergedResults = mapWarehouseRowsToResults(enrichedFresh, freshPhoto, freshUrl, rawQuery);
           } else {
             mergedResults = mapCatalogCandidatesToResults(
               cacheLookup.candidates,
               freshCodes,
               officialName,
               freshPhoto,
-              freshUrl
+              freshUrl,
+              rawQuery
             );
           }
         } else if (!sourceUrl) {
@@ -962,24 +1010,34 @@ Deno.serve(async (req: Request) => {
           buildCatalogSearchUrl(candidateCodes[0] || officialName);
         sourceUrl = fallbackUrl;
         const codesToShow = candidateCodes.length > 0 ? candidateCodes.slice(0, 3) : ['-'];
-        mergedResults = codesToShow.map((displayCode, idx) => ({
-          id: `catalog-${normalizePartCode(displayCode) || 'item'}-${idx}`,
-          photoUrl: catalogPhotoUrl,
-          officialName,
-          partCode: displayCode,
-          rackCode: '-',
-          price: null,
-          priceSource: 'none',
-          category: null,
-          stock: null,
-          minStock: null,
-          stockKnown: false,
-          substitutedBy: null,
-          inWarehouse: false,
-          stockStatus: 'belum_di_gudang',
-          statusLabel: 'Belum ada di Honda Menara Agung Padang Panjang',
-          sourceUrl: fallbackUrl,
-        }));
+        mergedResults = codesToShow.map((displayCode, idx) => {
+          const rackInfo = resolveAccessoryApparelRack({
+            partCode: displayCode !== '-' ? displayCode : rawQuery,
+            officialName,
+            userQuery: rawQuery,
+          });
+          return {
+            id: `catalog-${normalizePartCode(displayCode) || 'item'}-${idx}`,
+            photoUrl: catalogPhotoUrl,
+            officialName,
+            partCode: displayCode,
+            rackCode: rackInfo.suggestedRackCode || '-',
+            isDummyRack: rackInfo.isDummyRack,
+            rackZoneLabel: rackInfo.zoneLabel,
+            itemGroup: rackInfo.itemGroup,
+            price: null,
+            priceSource: 'none',
+            category: null,
+            stock: null,
+            minStock: null,
+            stockKnown: false,
+            substitutedBy: null,
+            inWarehouse: false,
+            stockStatus: 'belum_di_gudang',
+            statusLabel: 'Belum ada di Honda Menara Agung Padang Panjang',
+            sourceUrl: fallbackUrl,
+          };
+        });
       }
     }
 

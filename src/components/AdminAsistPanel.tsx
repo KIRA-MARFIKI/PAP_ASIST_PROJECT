@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import gsap from 'gsap';
-import { CloudDownload, FileClock, KeyRound, LogOut, Pencil, Upload, X } from 'lucide-react';
+import { CloudDownload, FileClock, KeyRound, LayoutGrid, LogOut, Pencil, Upload, X } from 'lucide-react';
 import {
   EnrichBatchResult,
   PartItem,
@@ -10,6 +10,7 @@ import {
 import { formatRupiah, getStockStatus, normalizePartCodeKey } from '../services/partsRepository';
 import { AdminSession } from './LoginModal';
 import { EditPartModal } from './EditPartModal';
+import { RackMapModal } from './RackMapModal';
 import { SurfaceWatermark } from './WatermarkOverlay';
 
 type AdminTab = 'all' | 'fast' | 'slow';
@@ -71,6 +72,7 @@ export function AdminAsistPanel({
   const [filterText, setFilterText] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [editingPart, setEditingPart] = useState<PartItem | null>(null);
+  const [isRackMapOpen, setIsRackMapOpen] = useState(false);
   const [isEnriching, setIsEnriching] = useState(false);
   const [enrichFeedback, setEnrichFeedback] = useState<{
     type: 'success' | 'error';
@@ -310,6 +312,16 @@ export function AdminAsistPanel({
                     {summary.pendingEnrich > 99 ? '99+' : summary.pendingEnrich}
                   </span>
                 )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsRackMapOpen(true)}
+                aria-label="Peta Rak Aksesoris dan Apparel"
+                title="Peta Rak Aksesoris & Apparel"
+                className="flex min-h-[44px] min-w-[44px] cursor-pointer items-center justify-center rounded-[8px] border border-[#E4E4E7] bg-white text-[#18181B] transition-colors hover:bg-[#F4F4F5] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#CC0000]"
+              >
+                <LayoutGrid size={19} strokeWidth={1.75} aria-hidden="true" />
               </button>
 
               <button
@@ -635,6 +647,12 @@ export function AdminAsistPanel({
             text: 'Data part berhasil diperbarui.',
           });
         }}
+      />
+
+      <RackMapModal
+        isOpen={isRackMapOpen}
+        parts={parts}
+        onClose={() => setIsRackMapOpen(false)}
       />
     </div>
   );

@@ -6,6 +6,7 @@ import {
   WarehouseParseResult,
 } from '../types/part';
 import { normalizePartCodeKey } from '../services/partsRepository';
+import { resolveAccessoryApparelRack } from './rackRules';
 
 export const WAREHOUSE_TEMPLATE_HEADERS = [
   'kode_part',
@@ -495,6 +496,17 @@ export async function parseWarehouseFile(file: File): Promise<WarehouseParseResu
     const kategori =
       row.explicitCategory ?? classifyHondaPartCategory(resolvedName, row.kodePart);
 
+    const rackSuggestion = resolveAccessoryApparelRack({
+      partCode: row.kodePart,
+      officialName: resolvedName,
+    });
+    const hasExplicitRack = row.kodeRak !== '-';
+    const finalRackCode = hasExplicitRack
+      ? row.kodeRak
+      : rackSuggestion.suggestedRackCode || '-';
+    const isDummyRack = !hasExplicitRack && Boolean(rackSuggestion.suggestedRackCode);
+    const itemGroup = rackSuggestion.itemGroup;
+
     const existing = mergedByKey.get(row.normalizedKey);
     if (existing) {
       duplicateMergedCount += 1;
@@ -511,11 +523,30 @@ export async function parseWarehouseFile(file: File): Promise<WarehouseParseResu
           : existing.kategori);
 
       const mergedAliases = Array.from(new Set([...existing.aliases, ...aliasesSet]));
+      const existingHasRealRack = existing.kodeRak !== '-' && !existing.isDummyRack;
+      const chosenRack = existingHasRealRack
+        ? existing.kodeRak
+        : hasExplicitRack
+          ? row.kodeRak
+          : existing.kodeRak !== '-'
+            ? existing.kodeRak
+            : finalRackCode;
+      const chosenIsDummyRack = existingHasRealRack
+        ? false
+        : hasExplicitRack
+          ? false
+          : existing.kodeRak !== '-'
+            ? existing.isDummyRack
+            : isDummyRack;
+      const chosenItemGroup =
+        existing.itemGroup !== 'sparepart' ? existing.itemGroup : itemGroup;
 
       mergedByKey.set(row.normalizedKey, {
         ...existing,
         namaResmi: chosenName,
-        kodeRak: existing.kodeRak !== '-' ? existing.kodeRak : row.kodeRak,
+        kodeRak: chosenRack,
+        itemGroup: chosenItemGroup,
+        isDummyRack: chosenIsDummyRack,
         harga: existing.harga !== null ? existing.harga : row.harga,
         priceSource: existing.harga !== null ? existing.priceSource : row.priceSource,
         kategori: chosenCategory,
@@ -531,7 +562,9 @@ export async function parseWarehouseFile(file: File): Promise<WarehouseParseResu
         normalizedKey: row.normalizedKey,
         kodePart: row.kodePart,
         namaResmi: resolvedName,
-        kodeRak: row.kodeRak,
+        kodeRak: finalRackCode,
+        itemGroup,
+        isDummyRack,
         harga: row.harga,
         priceSource: row.priceSource,
         kategori,

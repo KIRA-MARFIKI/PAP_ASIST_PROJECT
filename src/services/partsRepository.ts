@@ -7,6 +7,7 @@ import { createPartPlaceholder } from '../utils/partPlaceholder';
 import { applyWatermarkToImageFile } from '../utils/watermark';
 import {
   EnrichBatchResult,
+  ItemGroup,
   ParsedWarehouseRow,
   PartCategory,
   PartItem,
@@ -18,6 +19,7 @@ import {
   UploadRowError,
   WarehouseStockStatus,
 } from '../types/part';
+import { RACK_BY_CODE } from '../utils/rackRules';
 
 const UPSERT_BATCH_SIZE = 500;
 const FETCH_PAGE_SIZE = 1000;
@@ -27,6 +29,8 @@ interface SupabaseWarehousePartRow {
   part_code_display: string;
   official_name: string;
   rack_code: string;
+  item_group?: ItemGroup | null;
+  is_dummy_rack?: boolean | null;
   price: number | string | null;
   price_source: PriceSource | null;
   category: PartCategory;
@@ -81,12 +85,16 @@ export function toWarehouseStockStatus(
 }
 
 export function partItemToSearchResult(part: PartItem): SearchResultItem {
+  const rackMeta = RACK_BY_CODE.get(part.kodeRak);
   return {
     id: part.id,
     foto: part.foto,
     namaResmi: part.namaResmi,
     kodePart: part.kodePart,
     kodeRak: part.kodeRak,
+    isDummyRack: part.isDummyRack,
+    rackZoneLabel: rackMeta?.zoneLabel ?? null,
+    itemGroup: part.itemGroup,
     harga: part.harga,
     priceSource: part.priceSource,
     stok: part.stok,
@@ -114,6 +122,10 @@ function mapSupabasePartRow(row: SupabaseWarehousePartRow): PartItem {
     typeof row.stock_known === 'boolean'
       ? row.stock_known
       : row.stock !== null && row.min_stock !== null;
+  const itemGroup: ItemGroup =
+    row.item_group === 'aksesoris' || row.item_group === 'apparel'
+      ? row.item_group
+      : 'sparepart';
 
   return {
     id: row.part_code,
@@ -121,6 +133,8 @@ function mapSupabasePartRow(row: SupabaseWarehousePartRow): PartItem {
     namaResmi: row.official_name,
     kodePart: row.part_code_display || row.part_code,
     kodeRak: row.rack_code || '-',
+    itemGroup,
+    isDummyRack: Boolean(row.is_dummy_rack),
     harga: Number.isFinite(numericPrice) ? numericPrice : null,
     priceSource,
     kategori: row.category === 'slow' ? 'slow' : 'fast',
@@ -152,7 +166,7 @@ export async function fetchAllParts(): Promise<{
     const { data, error } = await supabase
       .from('warehouse_parts')
       .select(
-        'part_code, part_code_display, official_name, rack_code, price, price_source, category, stock, min_stock, stock_known, substituted_by, catalog_url, ai_enriched, photo_url, aliases'
+        'part_code, part_code_display, official_name, rack_code, item_group, is_dummy_rack, price, price_source, category, stock, min_stock, stock_known, substituted_by, catalog_url, ai_enriched, photo_url, aliases'
       )
       .order('official_name', { ascending: true })
       .order('part_code', { ascending: true })
@@ -234,7 +248,7 @@ export async function upsertWarehouseParts(
     const { data: liveRows, error: liveFetchErr } = await supabase
       .from('warehouse_parts')
       .select(
-        'part_code, part_code_display, official_name, rack_code, price, price_source, category, stock, min_stock, stock_known, substituted_by, catalog_url, ai_enriched, photo_url, aliases'
+        'part_code, part_code_display, official_name, rack_code, item_group, is_dummy_rack, price, price_source, category, stock, min_stock, stock_known, substituted_by, catalog_url, ai_enriched, photo_url, aliases'
       )
       .in('part_code', keyChunk);
 
@@ -263,11 +277,32 @@ export async function upsertWarehouseParts(
         ? prev.stokMinimum
         : null;
 
+    const prevHasConfirmedRack = Boolean(prev && prev.kodeRak !== '-' && !prev.isDummyRack);
+    const incomingHasConfirmedRack = row.kodeRak !== '-' && !row.isDummyRack;
+    const finalRackCode = incomingHasConfirmedRack
+      ? row.kodeRak
+      : prevHasConfirmedRack
+        ? prev!.kodeRak
+        : row.kodeRak !== '-'
+          ? row.kodeRak
+          : prev?.kodeRak || '-';
+    const finalIsDummyRack = incomingHasConfirmedRack
+      ? false
+      : prevHasConfirmedRack
+        ? false
+        : row.kodeRak !== '-'
+          ? row.isDummyRack
+          : Boolean(prev?.isDummyRack);
+    const finalItemGroup: ItemGroup =
+      row.itemGroup !== 'sparepart' ? row.itemGroup : (prev?.itemGroup ?? 'sparepart');
+
     return {
       part_code: row.normalizedKey,
       part_code_display: row.kodePart,
       official_name: chosenName,
-      rack_code: row.kodeRak !== '-' ? row.kodeRak : prev?.kodeRak || '-',
+      rack_code: finalRackCode,
+      item_group: finalItemGroup,
+      is_dummy_rack: finalIsDummyRack,
       price: keepPrevPrice ? prev.harga : row.harga,
       price_source: keepPrevPrice ? prev.priceSource : row.priceSource,
       category: row.kategori,
@@ -492,6 +527,8 @@ export async function updateSinglePart(
   const updatePatch: Record<string, unknown> = {
     official_name: payload.namaResmi,
     rack_code: payload.kodeRak || '-',
+    item_group: payload.itemGroup,
+    is_dummy_rack: payload.isDummyRack,
     price: payload.harga,
     price_source: payload.priceSource,
     category: payload.kategori,
@@ -534,6 +571,8 @@ export async function updateSinglePart(
       ...part,
       namaResmi: payload.namaResmi,
       kodeRak: payload.kodeRak || '-',
+      itemGroup: payload.itemGroup,
+      isDummyRack: payload.isDummyRack,
       harga: payload.harga,
       priceSource: payload.priceSource,
       kategori: payload.kategori,
